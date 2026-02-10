@@ -8,6 +8,7 @@ import (
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot" // <--- Importante: Importar o pacote chatwoot
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow"
@@ -41,6 +42,9 @@ func handleMessage(ctx context.Context, evt *events.Message, chatStorageRepo dom
 
 	// Forward to webhook if configured
 	handleWebhookForward(ctx, evt, client)
+
+	// Sincronizar Avatar com Chatwoot (NOVO)
+	handleChatwootSync(ctx, evt, client)
 }
 
 func buildMessageMetaParts(evt *events.Message) []string {
@@ -103,8 +107,6 @@ func handleWebhookForward(ctx context.Context, evt *events.Message, client *what
 	// Skip webhook for protocol messages that are internal sync messages
 	if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil {
 		protocolType := protocolMessage.GetType().String()
-		// Only allow REVOKE and MESSAGE_EDIT through - skip all other protocol messages
-		// (HISTORY_SYNC_NOTIFICATION, APP_STATE_SYNC_KEY_SHARE, EPHEMERAL_SYNC_RESPONSE, etc.)
 		switch protocolType {
 		case "REVOKE", "MESSAGE_EDIT":
 			// These are meaningful user actions, allow webhook
@@ -124,4 +126,34 @@ func handleWebhookForward(ctx context.Context, evt *events.Message, client *what
 			}
 		}(evt, client)
 	}
+}
+
+// handleChatwootSync aciona a sincronização do avatar/contato quando chega mensagem
+func handleChatwootSync(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
+	if !config.ChatwootEnabled {
+		return
+	}
+	// Se a mensagem for minha, não preciso atualizar o contato do destinatário agora
+	if evt.Info.IsFromMe {
+		return
+	}
+
+	// Obtém a instância do serviço de sync (que deve ter sido inicializada no start da aplicação)
+	syncSvc := chatwoot.GetDefaultSyncService()
+	if syncSvc == nil {
+		// Serviço ainda não inicializado, ignorar
+		return
+	}
+
+	senderJID := evt.Info.Sender.ToNonAD().String()
+
+	// Roda em background para não travar o processamento da mensagem
+	go func() {
+		// Cria um contexto novo de background, pois o ctx da mensagem pode ser cancelado rápido
+		bgCtx := context.Background()
+		if err := syncSvc.SyncContactAvatar(bgCtx, senderJID, client); err != nil {
+			// Log nível Debug/Warn para não poluir demais caso falhe sempre
+			logrus.Debugf("Chatwoot Sync: Failed to auto-sync avatar for %s: %v", senderJID, err)
+		}
+	}()
 }
