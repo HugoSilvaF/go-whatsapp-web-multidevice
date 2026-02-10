@@ -441,8 +441,8 @@ func (s *SyncService) SyncContactAvatar(ctx context.Context, contactJID string, 
 
 	// 3. Obtém a URL da foto de perfil do WhatsApp
 	jid, _ := waTypes.ParseJID(contactJID)
-	picInfo, err := waClient.GetProfilePictureInfo(jid, &whatsmeow.GetProfilePictureParams{
-		Preview: false, // False = Pega imagem em alta qualidade se possível
+	picInfo, err := waClient.GetProfilePictureInfo(ctx, jid, &whatsmeow.GetProfilePictureParams{
+		Preview: false,
 	})
 
 	if err != nil {
