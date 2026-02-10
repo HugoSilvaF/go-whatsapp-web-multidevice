@@ -3,6 +3,7 @@ package chatwoot
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,12 +11,15 @@ import (
 	"sync"
 	"time"
 
+	"net/http"
+
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	waTypes "go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -206,6 +210,13 @@ func (s *SyncService) syncChat(
 			time.Sleep(opts.DelayBetweenBatches)
 		}
 	}
+
+	go func() {
+		logrus.Debugf("Chatwoot Sync: Starting avatar sync for %s", chat.JID)
+		if err := s.SyncContactAvatar(ctx, chat.JID, waClient); err != nil {
+			logrus.Warnf("Failed to auto-sync avatar for %s: %v", chat.JID, err)
+		}
+	}()
 
 	return nil
 }
@@ -398,6 +409,75 @@ func GetSyncService(
 // GetDefaultSyncService returns the global sync service if initialized
 func GetDefaultSyncService() *SyncService {
 	return globalSyncService
+}
+
+func (s *SyncService) SyncContactAvatar(ctx context.Context, contactJID string, waClient *whatsmeow.Client) error {
+	if waClient == nil {
+		return fmt.Errorf("whatsapp client is nil")
+	}
+
+	// 1. Busca/Cria o contato no Chatwoot para garantir que temos o ID
+	// Usamos o JID como nome temporário se não tivermos outro, a função FindOrCreate lida com a busca
+	isGroup := strings.HasSuffix(contactJID, "@g.us")
+	name := utils.ExtractPhoneFromJID(contactJID) // Ou busque o nome real se tiver disponível
+	contact, err := s.client.FindOrCreateContact(name, contactJID, isGroup)
+	if err != nil {
+		return fmt.Errorf("failed to find/create contact: %w", err)
+	}
+
+	// 2. Atualiza o JID (Identifier) se estiver faltando ou diferente
+	// Isso garante que o link entre Zap e Chatwoot esteja correto pelo identifier
+	if contact.Identifier != contactJID {
+		attrs := map[string]interface{}{
+			"waha_whatsapp_jid": contactJID,
+		}
+		if err := s.client.UpdateContactAttributes(contact.ID, contactJID, attrs); err != nil {
+			logrus.Warnf("Chatwoot Sync: Failed to update contact attributes for %s: %v", contactJID, err)
+			// Não retorna erro fatal, tenta atualizar a foto mesmo assim
+		} else {
+			logrus.Debugf("Chatwoot Sync: Updated JID for contact %d to %s", contact.ID, contactJID)
+		}
+	}
+
+	// 3. Obtém a URL da foto de perfil do WhatsApp
+	jid, _ := waTypes.ParseJID(contactJID)
+	picInfo, err := waClient.GetProfilePictureInfo(jid, &whatsmeow.GetProfilePictureParams{
+		Preview: false, // False = Pega imagem em alta qualidade se possível
+	})
+
+	if err != nil {
+		// Se der erro 404 (sem foto) ou outro, apenas logamos e saímos
+		logrus.Debugf("Chatwoot Sync: No profile picture found for %s: %v", contactJID, err)
+		return nil
+	}
+
+	if picInfo == nil || picInfo.URL == "" {
+		return nil
+	}
+
+	// 4. Baixa a imagem da URL retornada pelo WhatsApp
+	resp, err := http.Get(picInfo.URL)
+	if err != nil {
+		return fmt.Errorf("failed to download profile picture: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download profile picture, status: %d", resp.StatusCode)
+	}
+
+	imgData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read profile picture data: %w", err)
+	}
+
+	// 5. Envia para o Chatwoot
+	if err := s.client.UpdateContactAvatar(contact.ID, imgData); err != nil {
+		return fmt.Errorf("failed to update chatwoot avatar: %w", err)
+	}
+
+	logrus.Infof("Chatwoot Sync: Profile picture updated for %s", contactJID)
+	return nil
 }
 
 // TriggerAutoSync is called when a device connects to optionally start auto-sync

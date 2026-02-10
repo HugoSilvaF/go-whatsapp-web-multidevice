@@ -567,3 +567,87 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 
 	return 0, nil
 }
+
+// UpdateContactAvatar faz o upload da foto de perfil para o contato no Chatwoot
+func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d", c.BaseURL, c.AccountID, contactID)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Cria o campo do arquivo "avatar"
+	// O nome do arquivo pode ser genérico, o Chatwoot processa pelo Content-Type
+	part, err := writer.CreateFormFile("avatar", "profile_pic.jpg")
+	if err != nil {
+		return fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := io.Copy(part, bytes.NewReader(avatarData)); err != nil {
+		return fmt.Errorf("failed to write avatar data: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", endpoint, body)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("api_access_token", c.APIToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update avatar: status %d body %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// UpdateContactAttributes atualiza o identifier (JID) e atributos personalizados
+func (c *Client) UpdateContactAttributes(contactID int, identifier string, customAttributes map[string]interface{}) error {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d", c.BaseURL, c.AccountID, contactID)
+
+	payload := map[string]interface{}{}
+
+	if identifier != "" {
+		payload["identifier"] = identifier
+	}
+
+	if customAttributes != nil {
+		payload["custom_attributes"] = customAttributes
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update payload: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", endpoint, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("api_access_token", c.APIToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update contact attributes: status %d body %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
