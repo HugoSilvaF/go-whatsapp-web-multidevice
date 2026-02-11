@@ -128,31 +128,31 @@ func handleWebhookForward(ctx context.Context, evt *events.Message, client *what
 	}
 }
 
-// handleChatwootSync aciona a sincronização do avatar/contato quando chega mensagem
 func handleChatwootSync(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
 	if !config.ChatwootEnabled {
 		return
 	}
+
 	// Se a mensagem for minha, não preciso atualizar o contato do destinatário agora
 	if evt.Info.IsFromMe {
 		return
 	}
 
-	// Obtém a instância do serviço de sync (que deve ter sido inicializada no start da aplicação)
+	// Obtém a instância do serviço de sync
 	syncSvc := chatwoot.GetDefaultSyncService()
 	if syncSvc == nil {
-		// Serviço ainda não inicializado, ignorar
 		return
 	}
 
-	senderJID := evt.Info.Sender.ToNonAD().String()
+	realJID := NormalizeJIDFromLID(ctx, evt.Info.Sender.ToNonAD(), client)
+	senderJID := realJID.String()
+	// ---------------------
 
 	// Roda em background para não travar o processamento da mensagem
 	go func() {
-		// Cria um contexto novo de background, pois o ctx da mensagem pode ser cancelado rápido
+		// Cria um contexto novo de background
 		bgCtx := context.Background()
 		if err := syncSvc.SyncContactAvatar(bgCtx, senderJID, client); err != nil {
-			// Log nível Debug/Warn para não poluir demais caso falhe sempre
 			logrus.Debugf("Chatwoot Sync: Failed to auto-sync avatar for %s: %v", senderJID, err)
 		}
 	}()
