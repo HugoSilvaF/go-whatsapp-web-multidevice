@@ -411,6 +411,7 @@ func GetDefaultSyncService() *SyncService {
 	return globalSyncService
 }
 
+// SyncContactAvatar synchronizes the contact's avatar from WhatsApp to Chatwoot
 func (s *SyncService) SyncContactAvatar(ctx context.Context, contactJID string, waClient *whatsmeow.Client) error {
 	if waClient == nil {
 		return fmt.Errorf("whatsapp client is nil")
