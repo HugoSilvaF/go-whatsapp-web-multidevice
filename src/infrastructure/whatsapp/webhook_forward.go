@@ -36,6 +36,16 @@ var (
 	// groupNameCache provides TTL-based caching for group names to reduce WhatsApp API calls
 	groupNameCache    sync.Map
 	groupNameCacheTTL = 5 * time.Minute
+
+	// chatwootForwardDeduper prevents duplicate forwarding of the same WhatsApp message ID.
+	// This guards against duplicate event-handler invocations for the same inbound event.
+	chatwootForwardDeduper = struct {
+		mu   sync.Mutex
+		seen map[string]time.Time
+	}{
+		seen: make(map[string]time.Time),
+	}
+	chatwootForwardDeduperTTL = 2 * time.Minute
 )
 
 // getCachedGroupName retrieves group name from cache if not expired.
@@ -442,6 +452,13 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 		return
 	}
 
+	if msgID, _ := data["id"].(string); msgID != "" {
+		if isDuplicateChatwootForward(msgID) {
+			logrus.Debugf("Chatwoot: Skipping duplicate forward for WhatsApp message %s", msgID)
+			return
+		}
+	}
+
 	// --- NOVO BLOCO DE FILTRAGEM ---
 	if shouldSkipMessage(data) {
 		logrus.Debug("Chatwoot: Skipping message type (reaction/poll_update/etc) to prevent spam")
@@ -467,6 +484,29 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 	if err := syncMessageToChatwoot(cw, info, content, attachments); err != nil {
 		logrus.Errorf("Chatwoot: %v", err)
 	}
+}
+
+func isDuplicateChatwootForward(messageID string) bool {
+	now := time.Now()
+
+	chatwootForwardDeduper.mu.Lock()
+	defer chatwootForwardDeduper.mu.Unlock()
+
+	// Opportunistic cleanup of expired entries.
+	for id, ts := range chatwootForwardDeduper.seen {
+		if now.Sub(ts) > chatwootForwardDeduperTTL {
+			delete(chatwootForwardDeduper.seen, id)
+		}
+	}
+
+	if ts, exists := chatwootForwardDeduper.seen[messageID]; exists {
+		if now.Sub(ts) <= chatwootForwardDeduperTTL {
+			return true
+		}
+	}
+
+	chatwootForwardDeduper.seen[messageID] = now
+	return false
 }
 
 // isEventWhitelisted checks if the given event name is in the configured whitelist

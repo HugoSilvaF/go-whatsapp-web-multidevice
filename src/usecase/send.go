@@ -479,6 +479,25 @@ func resolveAudioMIME(filename string, audioBytes []byte) string {
 	return detectedMime
 }
 
+// isLikelyOpusOgg checks if bytes appear to be an OGG Opus stream.
+// We look for the OGG container marker and the Opus identification header.
+func isLikelyOpusOgg(audioBytes []byte) bool {
+	if len(audioBytes) < 64 {
+		return false
+	}
+	if !bytes.Contains(audioBytes[:minInt(len(audioBytes), 4096)], []byte("OggS")) {
+		return false
+	}
+	return bytes.Contains(audioBytes[:minInt(len(audioBytes), 4096)], []byte("OpusHead"))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // runFFProbe executes ffprobe with the given arguments and returns the output.
 // Returns empty output and error if ffprobe is not available or fails.
 func runFFProbe(args ...string) ([]byte, error) {
@@ -1052,11 +1071,17 @@ func (service serviceSend) SendAudio(ctx context.Context, request domainSend.Aud
 	// If PTT is requested, convert audio to OGG Opus format for WhatsApp voice note compatibility
 	// WhatsApp clients require OGG Opus format for voice notes to play correctly
 	if request.PTT {
-		// Check if already OGG format - skip conversion
+		// Check if already OGG format and actually Opus codec.
+		// Some files are ".ogg" but not Opus (e.g., Vorbis), which WhatsApp can render as file attachment.
 		isAlreadyOgg := strings.HasPrefix(audioMimeType, "audio/ogg") ||
 			strings.HasPrefix(audioMimeType, "application/ogg")
+		isAlreadyOpus := isAlreadyOgg && isLikelyOpusOgg(audioBytes)
 
-		if !isAlreadyOgg {
+		if !isAlreadyOpus {
+			if isAlreadyOgg {
+				logrus.Debug("PTT requested: source is OGG but not Opus, converting to OGG Opus")
+			}
+
 			// Check if ffmpeg is installed
 			_, err := exec.LookPath("ffmpeg")
 			if err != nil {
@@ -1124,7 +1149,7 @@ func (service serviceSend) SendAudio(ctx context.Context, request domainSend.Aud
 
 			logrus.Infof("Converted audio to OGG Opus for PTT: %d bytes", len(audioBytes))
 		} else {
-			// Already OGG format, ensure MIME type is correctly set
+			// Already OGG Opus, ensure MIME type is correctly set
 			audioMimeType = "audio/ogg; codecs=opus"
 		}
 	}

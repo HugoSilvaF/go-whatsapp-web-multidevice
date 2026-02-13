@@ -39,3 +39,36 @@ func TestResolveDocumentMIME(t *testing.T) {
 		})
 	}
 }
+
+func TestIsLikelyOpusOgg(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{
+			name: "ValidOggOpusMarkers",
+			data: append([]byte("0000OggSxxxxOpusHeadyyyy"), make([]byte, 80)...),
+			want: true,
+		},
+		{
+			name: "OggWithoutOpus",
+			data: append([]byte("0000OggSxxxxVorbisHeaderyyyy"), make([]byte, 80)...),
+			want: false,
+		},
+		{
+			name: "NonOggData",
+			data: []byte("ID3\x04\x00\x00some-mp3-data"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isLikelyOpusOgg(tt.data)
+			if got != tt.want {
+				t.Fatalf("isLikelyOpusOgg() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

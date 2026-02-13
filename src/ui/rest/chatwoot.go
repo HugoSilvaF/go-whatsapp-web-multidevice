@@ -3,6 +3,8 @@ package rest
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -23,6 +25,47 @@ type ChatwootHandler struct {
 	SendUsecase     domainSend.ISendUsecase
 	DeviceManager   *whatsapp.DeviceManager
 	ChatStorageRepo domainChatStorage.IChatStorageRepository
+}
+
+var audioAttachmentExtensions = map[string]struct{}{
+	".aac":  {},
+	".amr":  {},
+	".flac": {},
+	".m4a":  {},
+	".mp3":  {},
+	".oga":  {},
+	".ogg":  {},
+	".opus": {},
+	".wav":  {},
+	".webm": {},
+}
+
+func attachmentExtension(att chatwoot.Attachment) string {
+	ext := strings.ToLower(strings.TrimSpace(att.Extension))
+	if ext != "" {
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		return ext
+	}
+
+	if att.DataURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(att.DataURL)
+	if err != nil {
+		return strings.ToLower(path.Ext(att.DataURL))
+	}
+	return strings.ToLower(path.Ext(parsed.Path))
+}
+
+func isAudioAttachment(att chatwoot.Attachment) bool {
+	if strings.EqualFold(strings.TrimSpace(att.FileType), "audio") {
+		return true
+	}
+	_, ok := audioAttachmentExtensions[attachmentExtension(att)]
+	return ok
 }
 
 func NewChatwootHandler(
@@ -210,6 +253,48 @@ func (h *ChatwootHandler) triggerAvatarSync(instance *whatsapp.DeviceInstance, c
 }
 
 func (h *ChatwootHandler) handleAttachment(c *fiber.Ctx, phone string, att chatwoot.Attachment, caption string) error {
+	logrus.Debugf("Chatwoot Webhook: handling attachment id=%d file_type=%s extension=%s data_url=%s",
+		att.ID, att.FileType, att.Extension, att.DataURL)
+
+	if isAudioAttachment(att) {
+		reqPTT := domainSend.AudioRequest{
+			BaseRequest: domainSend.BaseRequest{Phone: phone},
+			AudioURL:    &att.DataURL,
+			PTT:         true, // First try as voice note (PTT)
+		}
+		_, err := h.SendUsecase.SendAudio(c.Context(), reqPTT)
+		if err == nil {
+			logrus.Infof("Chatwoot Webhook: Sent audio attachment as PTT to %s", phone)
+			return nil
+		}
+
+		logrus.Warnf("Chatwoot Webhook: Failed to send as PTT audio (%v), retrying as regular audio...", err)
+
+		reqAudio := domainSend.AudioRequest{
+			BaseRequest: domainSend.BaseRequest{Phone: phone},
+			AudioURL:    &att.DataURL,
+			PTT:         false,
+		}
+		_, err = h.SendUsecase.SendAudio(c.Context(), reqAudio)
+		if err == nil {
+			logrus.Infof("Chatwoot Webhook: Sent audio attachment as regular audio to %s", phone)
+			return nil
+		}
+
+		logrus.Warnf("Chatwoot Webhook: Failed to send as regular audio (%v), retrying as file...", err)
+		// Last fallback to file
+		reqFile := domainSend.FileRequest{
+			BaseRequest: domainSend.BaseRequest{Phone: phone},
+			FileURL:     &att.DataURL,
+			Caption:     caption,
+		}
+		_, err = h.SendUsecase.SendFile(c.Context(), reqFile)
+		if err == nil {
+			logrus.Infof("Chatwoot Webhook: Sent audio attachment as file to %s", phone)
+		}
+		return err
+	}
+
 	switch att.FileType {
 	case "image":
 		req := domainSend.ImageRequest{
@@ -220,31 +305,6 @@ func (h *ChatwootHandler) handleAttachment(c *fiber.Ctx, phone string, att chatw
 		_, err := h.SendUsecase.SendImage(c.Context(), req)
 		if err == nil {
 			logrus.Infof("Chatwoot Webhook: Sent image attachment to %s", phone)
-		}
-		return err
-
-	case "audio":
-		req := domainSend.AudioRequest{
-			BaseRequest: domainSend.BaseRequest{Phone: phone},
-			AudioURL:    &att.DataURL,
-			PTT:         true, // Send as PTT (Voice Note) for better mobile experience
-		}
-		_, err := h.SendUsecase.SendAudio(c.Context(), req)
-		if err == nil {
-			logrus.Infof("Chatwoot Webhook: Sent audio attachment to %s", phone)
-			return nil
-		}
-
-		logrus.Warnf("Chatwoot Webhook: Failed to send as audio (%v), retrying as file...", err)
-		// Fallback to sending as file
-		reqFile := domainSend.FileRequest{
-			BaseRequest: domainSend.BaseRequest{Phone: phone},
-			FileURL:     &att.DataURL,
-			Caption:     caption,
-		}
-		_, err = h.SendUsecase.SendFile(c.Context(), reqFile)
-		if err == nil {
-			logrus.Infof("Chatwoot Webhook: Sent audio as file attachment to %s", phone)
 		}
 		return err
 
