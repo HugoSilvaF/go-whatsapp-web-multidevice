@@ -543,16 +543,25 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 		// Process each file in a closure to ensure proper cleanup of file handles
 		// This prevents file descriptor leaks when processing multiple attachments
 		func(fp string) {
-			file, err := os.Open(fp)
+			uploadPath, cleanup := prepareAttachmentForUpload(fp)
+			defer cleanup()
+
+			file, err := os.Open(uploadPath)
 			if err != nil {
-				logrus.Errorf("Failed to open file %s: %v", fp, err)
+				logrus.Errorf("Failed to open file %s: %v", uploadPath, err)
 				return
 			}
 			defer file.Close()
 
-			fileName := filepath.Base(fp)
+			fileName := filepath.Base(uploadPath)
 
-			mimeType := mime.TypeByExtension(filepath.Ext(fp))
+			mimeType := mime.TypeByExtension(filepath.Ext(uploadPath))
+			if mimeType == "" {
+				detectedType, err := detectContentType(uploadPath)
+				if err == nil && detectedType != "" {
+					mimeType = detectedType
+				}
+			}
 			if mimeType == "" {
 				mimeType = "application/octet-stream"
 			}
@@ -564,10 +573,13 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 
 			part, err := writer.CreatePart(h)
 			if err != nil {
-				logrus.Errorf("Failed to create form part for %s: %v", fp, err)
+				logrus.Errorf("Failed to create form part for %s: %v", uploadPath, err)
 				return
 			}
-			io.Copy(part, file)
+			if _, err := io.Copy(part, file); err != nil {
+				logrus.Errorf("Failed to copy file %s to multipart body: %v", uploadPath, err)
+				return
+			}
 		}(filePath)
 	}
 
