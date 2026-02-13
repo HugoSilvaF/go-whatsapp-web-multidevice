@@ -46,3 +46,38 @@ func TestIsAudioAttachmentByExtension(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldMarkAsRecordedAudio(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		mimeType string
+		expected bool
+	}{
+		{
+			name:     "audio mime type",
+			filePath: "file.bin",
+			mimeType: "audio/mpeg",
+			expected: true,
+		},
+		{
+			name:     "audio extension fallback",
+			filePath: "voice.ogg",
+			mimeType: "application/octet-stream",
+			expected: true,
+		},
+		{
+			name:     "non audio",
+			filePath: "file.pdf",
+			mimeType: "application/pdf",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		got := shouldMarkAsRecordedAudio(tt.filePath, tt.mimeType)
+		if got != tt.expected {
+			t.Errorf("%s: shouldMarkAsRecordedAudio(%q, %q) = %v, expected %v", tt.name, tt.filePath, tt.mimeType, got, tt.expected)
+		}
+	}
+}

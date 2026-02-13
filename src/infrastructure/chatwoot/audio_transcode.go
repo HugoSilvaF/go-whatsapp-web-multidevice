@@ -44,6 +44,13 @@ func shouldTranscodeToMP3(filePath string) bool {
 	return !passthrough
 }
 
+func shouldMarkAsRecordedAudio(filePath, mimeType string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "audio/") {
+		return true
+	}
+	return isAudioAttachment(filePath)
+}
+
 func isAudioAttachment(filePath string) bool {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	if ext != "" {

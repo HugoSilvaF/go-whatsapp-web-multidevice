@@ -539,6 +539,9 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 	_ = writer.WriteField("message_type", messageType)
 	_ = writer.WriteField("private", "false")
 
+	recordedAudioFilenames := make([]string, 0, len(attachments))
+	recordedAudioSeen := make(map[string]struct{}, len(attachments))
+
 	for _, filePath := range attachments {
 		// Process each file in a closure to ensure proper cleanup of file handles
 		// This prevents file descriptor leaks when processing multiple attachments
@@ -566,6 +569,13 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 				mimeType = "application/octet-stream"
 			}
 
+			if shouldMarkAsRecordedAudio(uploadPath, mimeType) {
+				if _, seen := recordedAudioSeen[fileName]; !seen {
+					recordedAudioSeen[fileName] = struct{}{}
+					recordedAudioFilenames = append(recordedAudioFilenames, fileName)
+				}
+			}
+
 			// Custom form part with correct Content-Type for Chatwoot to render images inline
 			h := make(textproto.MIMEHeader)
 			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="attachments[]"; filename="%s"`, fileName))
@@ -583,7 +593,19 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 		}(filePath)
 	}
 
-	writer.Close()
+	if len(recordedAudioFilenames) > 0 {
+		logrus.Debugf("Chatwoot: marking audio attachments as recorded audio: %v", recordedAudioFilenames)
+		raw, err := json.Marshal(recordedAudioFilenames)
+		if err != nil {
+			logrus.Warnf("Chatwoot: failed to encode is_recorded_audio metadata: %v", err)
+		} else if err := writer.WriteField("is_recorded_audio", string(raw)); err != nil {
+			logrus.Warnf("Chatwoot: failed to write is_recorded_audio field: %v", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close multipart writer: %w", err)
+	}
 
 	req, err := http.NewRequest("POST", endpoint, body)
 	if err != nil {
