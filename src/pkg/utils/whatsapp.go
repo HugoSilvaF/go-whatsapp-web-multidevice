@@ -73,19 +73,208 @@ func determineMediaExtension(originalFilename, mimeType string) string {
 		}
 	}
 
-	if ext, ok := resolveKnownDocumentExtension(mimeType); ok {
+	normalizedMimeType := strings.TrimSpace(mimeType)
+	if normalizedMimeType != "" {
+		if parsedType, _, err := mime.ParseMediaType(normalizedMimeType); err == nil && parsedType != "" {
+			normalizedMimeType = parsedType
+		} else if semi := strings.Index(normalizedMimeType, ";"); semi >= 0 {
+			normalizedMimeType = strings.TrimSpace(normalizedMimeType[:semi])
+		}
+	}
+
+	if ext, ok := resolveKnownDocumentExtension(normalizedMimeType); ok {
 		return ext
 	}
 
-	if ext, err := mime.ExtensionsByType(mimeType); err == nil && len(ext) > 0 {
-		return ext[0]
+	if normalizedMimeType != "" {
+		if ext, err := mime.ExtensionsByType(normalizedMimeType); err == nil && len(ext) > 0 {
+			return ext[0]
+		}
+	}
+
+	if normalizedMimeType == "audio/ogg" || normalizedMimeType == "audio/opus" || normalizedMimeType == "application/ogg" {
+		return ".ogg"
+	}
+
+	if normalizedMimeType == "audio/mpeg" {
+		return ".mp3"
+	}
+
+	if normalizedMimeType == "audio/mp4" {
+		return ".m4a"
+	}
+
+	if normalizedMimeType == "audio/aac" {
+		return ".aac"
+	}
+
+	if normalizedMimeType == "audio/wav" || normalizedMimeType == "audio/x-wav" {
+		return ".wav"
+	}
+
+	if normalizedMimeType == "audio/webm" {
+		return ".webm"
+	}
+
+	if parts := strings.Split(normalizedMimeType, "/"); len(parts) > 1 {
+		cleanSubtype := strings.TrimSpace(parts[len(parts)-1])
+		if cleanSubtype != "" {
+			return "." + cleanSubtype
+		}
 	}
 
 	if parts := strings.Split(mimeType, "/"); len(parts) > 1 {
-		return "." + parts[len(parts)-1]
+		cleanSubtype := strings.TrimSpace(parts[len(parts)-1])
+		cleanSubtype = strings.ReplaceAll(cleanSubtype, ";", "")
+		cleanSubtype = strings.ReplaceAll(cleanSubtype, " ", "")
+		if cleanSubtype != "" {
+			return "." + cleanSubtype
+		}
 	}
 
 	return ""
+}
+
+func normalizeMimeType(mimeType string) string {
+	normalized := strings.TrimSpace(mimeType)
+	if normalized == "" {
+		return ""
+	}
+	if parsed, _, err := mime.ParseMediaType(normalized); err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed))
+	}
+	if semi := strings.Index(normalized, ";"); semi >= 0 {
+		normalized = normalized[:semi]
+	}
+	return strings.ToLower(strings.TrimSpace(normalized))
+}
+
+func normalizeAudioMimeType(mimeType string) string {
+	base := normalizeMimeType(mimeType)
+	switch base {
+	case "application/ogg", "audio/opus":
+		return "audio/ogg"
+	case "audio/x-wav":
+		return "audio/wav"
+	default:
+		return base
+	}
+}
+
+func normalizeExtractedMediaMimeType(mediaFile whatsmeow.DownloadableMessage, mimeType string, extension string) string {
+	base := normalizeMimeType(mimeType)
+	if base == "" {
+		if ext := strings.ToLower(filepath.Ext(extension)); ext != "" {
+			base = strings.ToLower(strings.TrimSpace(mime.TypeByExtension(ext)))
+		}
+	}
+
+	ext := strings.ToLower(strings.TrimSpace(extension))
+	if ext == "" {
+		ext = strings.ToLower(filepath.Ext(extension))
+	}
+
+	switch mediaFile.(type) {
+	case *waE2E.AudioMessage:
+		normalized := normalizeAudioMimeType(mimeType)
+		if normalized != "" {
+			return normalized
+		}
+		switch ext {
+		case ".mp3":
+			return "audio/mpeg"
+		case ".m4a", ".mp4":
+			return "audio/mp4"
+		case ".aac":
+			return "audio/aac"
+		case ".wav":
+			return "audio/wav"
+		case ".webm":
+			return "audio/webm"
+		default:
+			return "audio/ogg"
+		}
+	}
+
+	if base != "" {
+		return base
+	}
+
+	return mimeType
+}
+
+func extensionFromPath(filePath string) string {
+	if filePath == "" {
+		return ""
+	}
+	return filepath.Ext(filePath)
+}
+
+func determineMimeTypeForExtractedMedia(mediaFile whatsmeow.DownloadableMessage, originalMimeType, mediaPath string) string {
+	ext := extensionFromPath(mediaPath)
+	return normalizeExtractedMediaMimeType(mediaFile, originalMimeType, ext)
+}
+
+func determineMediaPath(storageLocation string, extension string) string {
+	return fmt.Sprintf("%s/%d-%s%s", storageLocation, time.Now().Unix(), uuid.NewString(), extension)
+}
+
+func writeExtractedMediaFile(path string, data []byte) error {
+	return os.WriteFile(path, data, 0600)
+}
+
+func extractMediaMimeInfo(mediaFile whatsmeow.DownloadableMessage, extractedMedia *ExtractedMedia) string {
+	var originalFilename string
+
+	switch media := mediaFile.(type) {
+	case *waE2E.ImageMessage:
+		extractedMedia.MimeType = media.GetMimetype()
+		extractedMedia.Caption = media.GetCaption()
+	case *waE2E.AudioMessage:
+		extractedMedia.MimeType = media.GetMimetype()
+	case *waE2E.VideoMessage:
+		extractedMedia.MimeType = media.GetMimetype()
+		extractedMedia.Caption = media.GetCaption()
+	case *waE2E.StickerMessage:
+		extractedMedia.MimeType = media.GetMimetype()
+	case *waE2E.DocumentMessage:
+		extractedMedia.MimeType = media.GetMimetype()
+		extractedMedia.Caption = media.GetCaption()
+		originalFilename = media.GetFileName()
+	}
+
+	return originalFilename
+}
+
+// ExtractMedia is a helper function to extract media from whatsapp
+func ExtractMedia(ctx context.Context, client *whatsmeow.Client, storageLocation string, mediaFile whatsmeow.DownloadableMessage) (extractedMedia ExtractedMedia, err error) {
+	if mediaFile == nil {
+		logrus.Info("Skip download because data is nil")
+		return extractedMedia, nil
+	}
+
+	data, err := client.Download(ctx, mediaFile)
+	if err != nil {
+		return extractedMedia, err
+	}
+
+	// Validate file size before writing to disk
+	maxFileSize := config.WhatsappSettingMaxDownloadSize
+	if int64(len(data)) > maxFileSize {
+		return extractedMedia, fmt.Errorf("file size exceeds the maximum limit of %d bytes", maxFileSize)
+	}
+
+	originalFilename := extractMediaMimeInfo(mediaFile, &extractedMedia)
+
+	extension := determineMediaExtension(originalFilename, extractedMedia.MimeType)
+	extractedMedia.MediaPath = determineMediaPath(storageLocation, extension)
+	extractedMedia.MimeType = determineMimeTypeForExtractedMedia(mediaFile, extractedMedia.MimeType, extractedMedia.MediaPath)
+
+	err = writeExtractedMediaFile(extractedMedia.MediaPath, data)
+	if err != nil {
+		return extractedMedia, err
+	}
+	return extractedMedia, nil
 }
 
 // ExtractMessageTextFromProto extracts text content from a WhatsApp proto message
@@ -545,53 +734,6 @@ type ExtractedMedia struct {
 	MediaPath string `json:"media_path"`
 	MimeType  string `json:"mime_type"`
 	Caption   string `json:"caption"`
-}
-
-// ExtractMedia is a helper function to extract media from whatsapp
-func ExtractMedia(ctx context.Context, client *whatsmeow.Client, storageLocation string, mediaFile whatsmeow.DownloadableMessage) (extractedMedia ExtractedMedia, err error) {
-	if mediaFile == nil {
-		logrus.Info("Skip download because data is nil")
-		return extractedMedia, nil
-	}
-
-	data, err := client.Download(ctx, mediaFile)
-	if err != nil {
-		return extractedMedia, err
-	}
-
-	// Validate file size before writing to disk
-	maxFileSize := config.WhatsappSettingMaxDownloadSize
-	if int64(len(data)) > maxFileSize {
-		return extractedMedia, fmt.Errorf("file size exceeds the maximum limit of %d bytes", maxFileSize)
-	}
-
-	var originalFilename string
-
-	switch media := mediaFile.(type) {
-	case *waE2E.ImageMessage:
-		extractedMedia.MimeType = media.GetMimetype()
-		extractedMedia.Caption = media.GetCaption()
-	case *waE2E.AudioMessage:
-		extractedMedia.MimeType = media.GetMimetype()
-	case *waE2E.VideoMessage:
-		extractedMedia.MimeType = media.GetMimetype()
-		extractedMedia.Caption = media.GetCaption()
-	case *waE2E.StickerMessage:
-		extractedMedia.MimeType = media.GetMimetype()
-	case *waE2E.DocumentMessage:
-		extractedMedia.MimeType = media.GetMimetype()
-		extractedMedia.Caption = media.GetCaption()
-		originalFilename = media.GetFileName()
-	}
-
-	extension := determineMediaExtension(originalFilename, extractedMedia.MimeType)
-
-	extractedMedia.MediaPath = fmt.Sprintf("%s/%d-%s%s", storageLocation, time.Now().Unix(), uuid.NewString(), extension)
-	err = os.WriteFile(extractedMedia.MediaPath, data, 0600)
-	if err != nil {
-		return extractedMedia, err
-	}
-	return extractedMedia, nil
 }
 
 // SanitizePhone sanitizes phone number by adding appropriate WhatsApp suffix

@@ -35,6 +35,75 @@ var passthroughAudioExtensions = map[string]struct{}{
 	".wav": {},
 }
 
+func canonicalizeMimeType(mimeType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(mimeType))
+	if normalized == "" {
+		return ""
+	}
+	if parsed, _, err := mime.ParseMediaType(normalized); err == nil {
+		normalized = strings.ToLower(strings.TrimSpace(parsed))
+	} else if semi := strings.Index(normalized, ";"); semi >= 0 {
+		normalized = strings.ToLower(strings.TrimSpace(normalized[:semi]))
+	}
+	switch normalized {
+	case "application/ogg", "audio/opus":
+		return "audio/ogg"
+	case "audio/x-wav":
+		return "audio/wav"
+	default:
+		return normalized
+	}
+}
+
+func audioMimeTypeByExtension(filePath string) string {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".mp3":
+		return "audio/mpeg"
+	case ".m4a", ".mp4":
+		return "audio/mp4"
+	case ".aac":
+		return "audio/aac"
+	case ".wav":
+		return "audio/wav"
+	case ".webm":
+		return "audio/webm"
+	case ".amr":
+		return "audio/amr"
+	case ".flac":
+		return "audio/flac"
+	case ".oga", ".ogg", ".opus":
+		return "audio/ogg"
+	default:
+		return ""
+	}
+}
+
+func normalizeAttachmentMimeType(filePath, mimeType string) string {
+	canonical := canonicalizeMimeType(mimeType)
+	if canonical != "" {
+		if shouldMarkAsRecordedAudio(filePath, canonical) {
+			byExt := audioMimeTypeByExtension(filePath)
+			if byExt != "" {
+				return byExt
+			}
+			if strings.HasPrefix(canonical, "audio/") {
+				return canonical
+			}
+			return "audio/ogg"
+		}
+		return canonical
+	}
+
+	if shouldMarkAsRecordedAudio(filePath, "") {
+		if byExt := audioMimeTypeByExtension(filePath); byExt != "" {
+			return byExt
+		}
+		return "audio/ogg"
+	}
+
+	return ""
+}
+
 func shouldTranscodeToMP3(filePath string) bool {
 	if !isAudioAttachment(filePath) {
 		return false
@@ -45,7 +114,8 @@ func shouldTranscodeToMP3(filePath string) bool {
 }
 
 func shouldMarkAsRecordedAudio(filePath, mimeType string) bool {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "audio/") {
+	canonical := canonicalizeMimeType(mimeType)
+	if strings.HasPrefix(canonical, "audio/") {
 		return true
 	}
 	return isAudioAttachment(filePath)
@@ -57,7 +127,7 @@ func isAudioAttachment(filePath string) bool {
 		if _, ok := audioExtensions[ext]; ok {
 			return true
 		}
-		mimeType := mime.TypeByExtension(ext)
+		mimeType := canonicalizeMimeType(mime.TypeByExtension(ext))
 		if strings.HasPrefix(mimeType, "audio/") {
 			return true
 		}
@@ -67,6 +137,7 @@ func isAudioAttachment(filePath string) bool {
 	if err != nil {
 		return false
 	}
+	mimeType = canonicalizeMimeType(mimeType)
 	return strings.HasPrefix(mimeType, "audio/")
 }
 

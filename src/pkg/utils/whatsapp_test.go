@@ -39,6 +39,18 @@ func TestDetermineMediaExtension(t *testing.T) {
 			mimeType:   "application/octet-stream",
 			wantSuffix: ".exe",
 		},
+		{
+			name:       "AudioOggWithCodecParams",
+			filename:   "",
+			mimeType:   "audio/ogg; codecs=opus",
+			wantSuffix: ".ogg",
+		},
+		{
+			name:       "ApplicationOgg",
+			filename:   "",
+			mimeType:   "application/ogg",
+			wantSuffix: ".ogg",
+		},
 	}
 
 	for _, tt := range tests {

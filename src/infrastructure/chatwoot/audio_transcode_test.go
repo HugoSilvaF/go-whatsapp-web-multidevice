@@ -81,3 +81,59 @@ func TestShouldMarkAsRecordedAudio(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalizeMimeType(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{input: "audio/ogg; codecs=opus", expected: "audio/ogg"},
+		{input: "application/ogg", expected: "audio/ogg"},
+		{input: "audio/x-wav", expected: "audio/wav"},
+		{input: "audio/mpeg", expected: "audio/mpeg"},
+		{input: " application/octet-stream ", expected: "application/octet-stream"},
+	}
+
+	for _, tt := range tests {
+		got := canonicalizeMimeType(tt.input)
+		if got != tt.expected {
+			t.Errorf("canonicalizeMimeType(%q) = %q, expected %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNormalizeAttachmentMimeType(t *testing.T) {
+	tests := []struct {
+		filePath string
+		mimeType string
+		expected string
+	}{
+		{
+			filePath: "voice.ogg",
+			mimeType: "application/ogg",
+			expected: "audio/ogg",
+		},
+		{
+			filePath: "voice.opus",
+			mimeType: "application/octet-stream",
+			expected: "audio/ogg",
+		},
+		{
+			filePath: "audio.mp3",
+			mimeType: "application/octet-stream",
+			expected: "audio/mpeg",
+		},
+		{
+			filePath: "image.jpg",
+			mimeType: "image/jpeg",
+			expected: "image/jpeg",
+		},
+	}
+
+	for _, tt := range tests {
+		got := normalizeAttachmentMimeType(tt.filePath, tt.mimeType)
+		if got != tt.expected {
+			t.Errorf("normalizeAttachmentMimeType(%q, %q) = %q, expected %q", tt.filePath, tt.mimeType, got, tt.expected)
+		}
+	}
+}

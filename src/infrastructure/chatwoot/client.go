@@ -558,12 +558,16 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 
 			fileName := filepath.Base(uploadPath)
 
-			mimeType := mime.TypeByExtension(filepath.Ext(uploadPath))
-			if mimeType == "" {
+			rawMimeType := mime.TypeByExtension(filepath.Ext(uploadPath))
+			if rawMimeType == "" {
 				detectedType, err := detectContentType(uploadPath)
 				if err == nil && detectedType != "" {
-					mimeType = detectedType
+					rawMimeType = detectedType
 				}
+			}
+			mimeType := normalizeAttachmentMimeType(uploadPath, rawMimeType)
+			if mimeType == "" {
+				mimeType = canonicalizeMimeType(rawMimeType)
 			}
 			if mimeType == "" {
 				mimeType = "application/octet-stream"
@@ -575,6 +579,7 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 					recordedAudioFilenames = append(recordedAudioFilenames, fileName)
 				}
 			}
+			logrus.Debugf("Chatwoot: attachment prepared filename=%s mime=%s path=%s", fileName, mimeType, uploadPath)
 
 			// Custom form part with correct Content-Type for Chatwoot to render images inline
 			h := make(textproto.MIMEHeader)
@@ -625,6 +630,13 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("failed to create message with attachments: status %d body %s", resp.StatusCode, string(respBody))
+	}
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		bodyForLog := string(respBody)
+		if len(bodyForLog) > 2048 {
+			bodyForLog = bodyForLog[:2048] + "...(truncated)"
+		}
+		logrus.Debugf("Chatwoot: createMessageWithAttachments response status=%d body=%s", resp.StatusCode, bodyForLog)
 	}
 
 	var result struct {
