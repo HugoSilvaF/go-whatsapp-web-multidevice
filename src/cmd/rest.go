@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/helpers"
@@ -82,6 +83,10 @@ func restServer(_ *cobra.Command, _ []string) {
 	// Chatwoot webhook - registered BEFORE basic auth middleware
 	// This allows Chatwoot to send webhooks without authentication
 	if config.ChatwootEnabled {
+		// Initialize global sync service early so event handlers can use avatar sync
+		// even before /chatwoot/sync endpoint is called.
+		chatwoot.GetSyncService(chatwoot.GetDefaultClient(), chatStorageRepo)
+
 		chatwootHandler := rest.NewChatwootHandler(appUsecase, sendUsecase, dm, chatStorageRepo)
 		webhookPath := "/chatwoot/webhook"
 		if config.AppBasePath != "" {

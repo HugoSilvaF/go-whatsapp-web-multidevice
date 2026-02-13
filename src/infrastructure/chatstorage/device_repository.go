@@ -167,3 +167,23 @@ func (r *DeviceRepository) GetDeviceRecord(deviceID string) (*domainChatStorage.
 func (r *DeviceRepository) DeleteDeviceRecord(deviceID string) error {
 	return r.base.DeleteDeviceRecord(deviceID)
 }
+
+func (r *DeviceRepository) GetChatExportState(deviceID, chatJID string) (*domainChatStorage.ChatExportState, error) {
+	return r.base.GetChatExportState(deviceID, chatJID)
+}
+
+func (r *DeviceRepository) UpsertChatExportState(state *domainChatStorage.ChatExportState) error {
+	return r.base.UpsertChatExportState(state)
+}
+
+func (r *DeviceRepository) IsMessageExported(deviceID, chatJID, messageKey string) (bool, error) {
+	return r.base.IsMessageExported(deviceID, chatJID, messageKey)
+}
+
+func (r *DeviceRepository) MarkMessageExported(deviceID, chatJID, messageKey string, chatwootMessageID int) error {
+	return r.base.MarkMessageExported(deviceID, chatJID, messageKey, chatwootMessageID)
+}
+
+func (r *DeviceRepository) IsChatwootMessageFromUs(chatwootMessageID int) (bool, error) {
+	return r.base.IsChatwootMessageFromUs(chatwootMessageID)
+}

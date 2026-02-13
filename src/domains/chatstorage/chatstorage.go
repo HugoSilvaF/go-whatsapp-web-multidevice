@@ -1,6 +1,105 @@
 package chatstorage
 
-import "time"
+import (
+	"context"
+	"database/sql"
+	"time"
+)
+
+type PostgresRepository struct {
+	DB *sql.DB
+}
+
+func (r *PostgresRepository) GetChatExportState(deviceID, chatJID string) (*ChatExportState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	row := r.DB.QueryRowContext(ctx, `
+		SELECT device_id, chat_jid, last_exported_at, updated_at
+		FROM chatwoot_export_state
+		WHERE device_id = $1 AND chat_jid = $2
+	`, deviceID, chatJID)
+
+	var st ChatExportState
+	err := row.Scan(&st.DeviceID, &st.ChatJID, &st.LastExportedAt, &st.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func (r *PostgresRepository) UpsertChatExportState(state *ChatExportState) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := r.DB.ExecContext(ctx, `
+		INSERT INTO chatwoot_export_state (device_id, chat_jid, last_exported_at, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (device_id, chat_jid)
+		DO UPDATE SET last_exported_at = EXCLUDED.last_exported_at, updated_at = NOW()
+	`, state.DeviceID, state.ChatJID, state.LastExportedAt)
+	return err
+}
+
+func (r *PostgresRepository) IsMessageExported(deviceID, chatJID, messageKey string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	row := r.DB.QueryRowContext(ctx, `
+		SELECT 1
+		FROM chatwoot_exported_messages
+		WHERE device_id = $1 AND chat_jid = $2 AND message_key = $3
+		LIMIT 1
+	`, deviceID, chatJID, messageKey)
+
+	var one int
+	err := row.Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *PostgresRepository) MarkMessageExported(deviceID, chatJID, messageKey string, chatwootMessageID int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := r.DB.ExecContext(ctx, `
+		INSERT INTO chatwoot_exported_messages (device_id, chat_jid, message_key, chatwoot_message_id, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (device_id, chat_jid, message_key)
+		DO NOTHING
+	`, deviceID, chatJID, messageKey, chatwootMessageID)
+	return err
+}
+
+func (r *PostgresRepository) IsChatwootMessageFromUs(chatwootMessageID int) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	row := r.DB.QueryRowContext(ctx, `
+		SELECT 1
+		FROM chatwoot_exported_messages
+		WHERE chatwoot_message_id = $1
+		LIMIT 1
+	`, chatwootMessageID)
+
+	var one int
+	err := row.Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 // Chat represents a WhatsApp chat/conversation
 type Chat struct {

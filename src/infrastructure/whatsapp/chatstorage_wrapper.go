@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -171,4 +172,24 @@ func (r *deviceChatStorage) GetDeviceRecord(deviceID string) (*domainChatStorage
 
 func (r *deviceChatStorage) DeleteDeviceRecord(deviceID string) error {
 	return r.base.DeleteDeviceRecord(deviceID)
+}
+
+func (d *deviceChatStorage) GetChatExportState(deviceID, chatJID string) (*chatstorage.ChatExportState, error) {
+	return d.base.GetChatExportState(deviceID, chatJID)
+}
+
+func (d *deviceChatStorage) UpsertChatExportState(state *chatstorage.ChatExportState) error {
+	return d.base.UpsertChatExportState(state)
+}
+
+func (d *deviceChatStorage) IsMessageExported(deviceID, chatJID, messageKey string) (bool, error) {
+	return d.base.IsMessageExported(deviceID, chatJID, messageKey)
+}
+
+func (d *deviceChatStorage) MarkMessageExported(deviceID, chatJID, messageKey string, chatwootMessageID int) error {
+	return d.base.MarkMessageExported(deviceID, chatJID, messageKey, chatwootMessageID)
+}
+
+func (d *deviceChatStorage) IsChatwootMessageFromUs(chatwootMessageID int) (bool, error) {
+	return d.base.IsChatwootMessageFromUs(chatwootMessageID)
 }

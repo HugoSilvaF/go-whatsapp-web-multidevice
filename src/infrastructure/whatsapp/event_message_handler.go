@@ -8,7 +8,7 @@ import (
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
-	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot" // <--- Importante: Importar o pacote chatwoot
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow"
@@ -43,7 +43,8 @@ func handleMessage(ctx context.Context, evt *events.Message, chatStorageRepo dom
 	// Forward to webhook if configured
 	handleWebhookForward(ctx, evt, client)
 
-	// Sincronizar Avatar com Chatwoot (NOVO)
+	// Sync avatar with Chatwoot.
+	logrus.Debugf("Chatwoot Sync: Checking if avatar sync is needed for message %s from %s", evt.Info.ID, evt.Info.SourceString())
 	handleChatwootSync(ctx, evt, client)
 }
 
@@ -103,7 +104,7 @@ func handleAutoMarkRead(ctx context.Context, evt *events.Message, client *whatsm
 	}
 }
 
-func handleWebhookForward(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
+func handleWebhookForward(_ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
 	// Skip webhook for protocol messages that are internal sync messages
 	if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil {
 		protocolType := protocolMessage.GetType().String()
@@ -129,31 +130,44 @@ func handleWebhookForward(ctx context.Context, evt *events.Message, client *what
 }
 
 func handleChatwootSync(ctx context.Context, evt *events.Message, client *whatsmeow.Client) {
+	logrus.Debugf("Chatwoot Sync: Avatar sync is enabled, processing message %s", evt.Info.ID)
 	if !config.ChatwootEnabled {
+		logrus.Debugf("Chatwoot Sync: Chatwoot integration is not enabled, skipping avatar sync for message %s", evt.Info.ID)
 		return
 	}
 
-	// Se a mensagem for minha, não preciso atualizar o contato do destinatário agora
+	if client == nil {
+		logrus.Debugf("Chatwoot Sync: WhatsApp client is nil, skipping avatar sync for message %s", evt.Info.ID)
+		return
+	}
+
+	// If the message is from me, skip avatar sync for this event.
 	if evt.Info.IsFromMe {
+		logrus.Debugf("Chatwoot Sync: Message %s is from me, skipping avatar sync", evt.Info.ID)
 		return
 	}
 
-	// Obtém a instância do serviço de sync
-	syncSvc := chatwoot.GetDefaultSyncService()
-	if syncSvc == nil {
-		return
-	}
+	logrus.Debugf("Chatwoot Sync: Attempting to sync avatar for message %s from %s", evt.Info.ID, evt.Info.SourceString())
 
 	realJID := NormalizeJIDFromLID(ctx, evt.Info.Sender.ToNonAD(), client)
 	senderJID := realJID.String()
-	// ---------------------
 
-	// Roda em background para não travar o processamento da mensagem
+	// Run in background to avoid blocking message processing.
 	go func() {
-		// Cria um contexto novo de background
-		bgCtx := context.Background()
-		if err := syncSvc.SyncContactAvatar(bgCtx, senderJID, client); err != nil {
-			logrus.Debugf("Chatwoot Sync: Failed to auto-sync avatar for %s: %v", senderJID, err)
+		logrus.Debugf("Chatwoot Sync: Attempting to auto-sync avatar for %s", senderJID)
+		syncSvc := chatwoot.GetDefaultSyncService()
+		if syncSvc == nil {
+			logrus.Debugf("Chatwoot Sync: Sync service is not initialized, skipping avatar sync for %s", senderJID)
+			return
 		}
+
+		syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if err := syncSvc.SyncContactAvatarSmart(syncCtx, senderJID, evt.Info.PushName, client); err != nil {
+			logrus.Debugf("Chatwoot Sync: Failed avatar sync for %s: %v", senderJID, err)
+		}
+
+		logrus.Debugf("Chatwoot Sync: Finished avatar sync for %s", senderJID)
 	}()
 }

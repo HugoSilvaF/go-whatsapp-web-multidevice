@@ -209,6 +209,41 @@ func (c *Client) FindContactByIdentifier(identifier string, isGroup bool) (*Cont
 	return nil, nil
 }
 
+func (c *Client) UploadAvatar(contactID int, imageBytes []byte) error {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// O campo no form-data deve se chamar "avatar"
+	part, err := writer.CreateFormFile("avatar", "avatar.png")
+	if err != nil {
+		return err
+	}
+	part.Write(imageBytes)
+	writer.Close()
+
+	url := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d/avatar", c.BaseURL, c.AccountID, contactID)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("api_access_token", c.APIToken) // Sua API Key do Chatwoot
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("falha no upload: status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts", c.BaseURL, c.AccountID)
 
@@ -575,12 +610,24 @@ func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	// Cria o campo do arquivo "avatar"
-	// O nome do arquivo pode ser genérico, o Chatwoot processa pelo Content-Type
-	part, err := writer.CreateFormFile("avatar", "profile_pic.jpg")
-	if err != nil {
-		return fmt.Errorf("failed to create form file: %w", err)
+	contentType := http.DetectContentType(avatarData)
+
+	ext := ".jpg"
+	if contentType == "image/png" {
+		ext = ".png"
 	}
+
+	// 3. Criar o cabeçalho MIME manualmente
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="avatar"; filename="profile%s"`, ext))
+	h.Set("Content-Type", contentType)
+
+	// 4. Usar CreatePart em vez de CreateFormFile
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		return fmt.Errorf("failed to create form part: %w", err)
+	}
+
 	if _, err := io.Copy(part, bytes.NewReader(avatarData)); err != nil {
 		return fmt.Errorf("failed to write avatar data: %w", err)
 	}
@@ -589,7 +636,7 @@ func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 
-	req, err := http.NewRequest("PUT", endpoint, body)
+	req, err := http.NewRequest("PATCH", endpoint, body)
 	if err != nil {
 		return err
 	}

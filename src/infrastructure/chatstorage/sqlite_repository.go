@@ -22,7 +22,38 @@ type SQLiteRepository struct {
 
 // NewSQLiteRepository creates a new SQLite repository
 func NewStorageRepository(db *sql.DB) domainChatStorage.IChatStorageRepository {
-	return &SQLiteRepository{db: db}
+	repo := &SQLiteRepository{db: db}
+
+	if err := repo.ensureChatwootExportTables(); err != nil {
+		logrus.Warnf("Chatwoot export tables: failed to ensure schema: %v", err)
+	}
+
+	return repo
+}
+
+func (r *SQLiteRepository) ensureChatwootExportTables() error {
+	_, err := r.db.Exec(`
+CREATE TABLE IF NOT EXISTS chatwoot_export_state (
+  device_id TEXT NOT NULL,
+  chat_jid  TEXT NOT NULL,
+  last_exported_at DATETIME NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (device_id, chat_jid)
+);
+
+CREATE TABLE IF NOT EXISTS chatwoot_exported_messages (
+  device_id TEXT NOT NULL,
+  chat_jid  TEXT NOT NULL,
+  message_key TEXT NOT NULL,
+  chatwoot_message_id INTEGER NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (device_id, chat_jid, message_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chatwoot_exported_messages_chatwoot_id
+  ON chatwoot_exported_messages (chatwoot_message_id);
+`)
+	return err
 }
 
 // StoreChat creates or updates a chat
@@ -1101,5 +1132,125 @@ func (r *SQLiteRepository) getMigrations() []string {
 
 		// Migration 12: Create index for devices
 		`CREATE INDEX IF NOT EXISTS idx_devices_created_at ON devices(created_at)`,
+
+		// Migration 13: Chatwoot export state
+		`CREATE TABLE IF NOT EXISTS chatwoot_export_state (
+  device_id TEXT NOT NULL,
+  chat_jid  TEXT NOT NULL,
+  last_exported_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (device_id, chat_jid)
+)`,
+
+		// Migration 14: Chatwoot exported messages dedupe
+		`CREATE TABLE IF NOT EXISTS chatwoot_exported_messages (
+  device_id TEXT NOT NULL,
+  chat_jid  TEXT NOT NULL,
+  message_key TEXT NOT NULL,
+  chatwoot_message_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (device_id, chat_jid, message_key)
+)`,
+
+		// Migration 15: index by chatwoot_message_id
+		`CREATE INDEX IF NOT EXISTS idx_chatwoot_exported_messages_chatwoot_id
+  ON chatwoot_exported_messages (chatwoot_message_id)`,
 	}
+}
+func (r *SQLiteRepository) GetChatExportState(deviceID, chatJID string) (*domainChatStorage.ChatExportState, error) {
+	row := r.db.QueryRow(`
+SELECT device_id, chat_jid, last_exported_at, updated_at
+FROM chatwoot_export_state
+WHERE device_id = ? AND chat_jid = ?
+LIMIT 1
+`, deviceID, chatJID)
+
+	var st domainChatStorage.ChatExportState
+	var lastStr, updStr string
+
+	err := row.Scan(&st.DeviceID, &st.ChatJID, &lastStr, &updStr)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	last, err := time.Parse(time.RFC3339Nano, lastStr)
+	if err != nil {
+		last, err = time.Parse(time.RFC3339, lastStr)
+		if err != nil {
+			last = time.Unix(0, 0).UTC()
+		}
+	}
+
+	upd, err := time.Parse(time.RFC3339Nano, updStr)
+	if err != nil {
+		upd, err = time.Parse(time.RFC3339, updStr)
+		if err != nil {
+			upd = time.Now().UTC()
+		}
+	}
+
+	st.LastExportedAt = last
+	st.UpdatedAt = upd
+	return &st, nil
+}
+
+func (r *SQLiteRepository) UpsertChatExportState(state *domainChatStorage.ChatExportState) error {
+	_, err := r.db.Exec(`
+INSERT INTO chatwoot_export_state (device_id, chat_jid, last_exported_at, updated_at)
+VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(device_id, chat_jid)
+DO UPDATE SET last_exported_at = excluded.last_exported_at,
+              updated_at = CURRENT_TIMESTAMP
+`, state.DeviceID, state.ChatJID, state.LastExportedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (r *SQLiteRepository) IsMessageExported(deviceID, chatJID, messageKey string) (bool, error) {
+	row := r.db.QueryRow(`
+SELECT 1
+FROM chatwoot_exported_messages
+WHERE device_id = ? AND chat_jid = ? AND message_key = ?
+LIMIT 1
+`, deviceID, chatJID, messageKey)
+
+	var one int
+	err := row.Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *SQLiteRepository) MarkMessageExported(deviceID, chatJID, messageKey string, chatwootMessageID int) error {
+	_, err := r.db.Exec(`
+INSERT INTO chatwoot_exported_messages (device_id, chat_jid, message_key, chatwoot_message_id, created_at)
+VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(device_id, chat_jid, message_key) DO NOTHING
+`, deviceID, chatJID, messageKey, chatwootMessageID)
+	return err
+}
+
+func (r *SQLiteRepository) IsChatwootMessageFromUs(chatwootMessageID int) (bool, error) {
+	row := r.db.QueryRow(`
+SELECT 1
+FROM chatwoot_exported_messages
+WHERE chatwoot_message_id = ?
+LIMIT 1
+`, chatwootMessageID)
+
+	var one int
+	err := row.Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

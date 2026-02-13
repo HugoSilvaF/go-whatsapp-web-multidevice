@@ -174,45 +174,137 @@ func extractChatwootContactInfo(ctx context.Context, data map[string]interface{}
 	return info, nil
 }
 
-// buildChatwootMessageContent extracts message body and attachments from the payload.
-// For group messages, prepends the sender name to the content.
-func buildChatwootMessageContent(data map[string]interface{}, isGroup bool, fromName string) (content string, attachments []string) {
+func classifyMessageSupport(data map[string]interface{}, content string, attachments []string) (bool, string) {
+	if content != "" || len(attachments) > 0 {
+		return true, ""
+	}
+
+	if t, ok := data["type"].(string); ok {
+		switch t {
+		case "sticker":
+			return true, "(Sticker)"
+		case "ephemeral":
+			return false, ""
+		case "protocol":
+			return false, ""
+		default:
+			return true, fmt.Sprintf("(Unsupported: %s)", t)
+		}
+	}
+
+	return false, ""
+}
+
+var mediaFields = []string{"image", "audio", "video", "document", "sticker", "video_note"}
+
+func buildChatwootMessageContent(data map[string]interface{}, isGroup bool, fromName string) (string, []string, bool) {
+	content := extractBaseContent(data)
+	content, isEdited := extractEditedContent(data, content)
+	attachments := extractAttachments(data)
+
+	supported, fallback := classifyMessageSupport(data, content, attachments)
+
+	if !supported {
+		return "", nil, false
+	}
+
+	if content == "" && fallback != "" {
+		content = fallback
+	}
+
+	if isEdited && content != "" {
+		content = "✏️ Editado: " + content
+	}
+
+	if isGroup && fromName != "" {
+		if content != "" {
+			content = fromName + ": " + content
+		} else if len(attachments) > 0 {
+			content = fromName + ": (media)"
+		}
+	}
+
+	return content, attachments, true
+}
+
+func extractBaseContent(data map[string]interface{}) string {
 	if body, ok := data["body"].(string); ok && body != "" {
-		content = body
+		return body
+	}
+	return extractStructuredMessageContent(data)
+}
+
+func extractEditedContent(data map[string]interface{}, content string) (string, bool) {
+	if editedMsg, ok := data["edited_msg"].(map[string]interface{}); ok {
+		if newBody, ok := editedMsg["body"].(string); ok && newBody != "" {
+			return newBody, true
+		}
+		if newCaption, ok := editedMsg["caption"].(string); ok && newCaption != "" {
+			return newCaption, true
+		}
 	}
 
-	if content == "" {
-		content = extractStructuredMessageContent(data)
-	}
-
-	// For group messages, prepend sender name to content
-	if isGroup && fromName != "" && content != "" {
-		content = fromName + ": " + content
-	}
-
-	// Extract media attachments
-	mediaFields := []string{"image", "audio", "video", "document", "sticker", "video_note"}
-	for _, field := range mediaFields {
-		if mediaData, ok := data[field]; ok {
-			if path, ok := mediaData.(string); ok && path != "" {
-				attachments = append(attachments, path)
-				logrus.Infof("Chatwoot: Found %s attachment at %s", field, path)
+	if typeVal, ok := data["type"].(string); ok {
+		if typeVal == "edited_msg" || typeVal == "protocol_message" {
+			if content != "" {
+				return content, true
 			}
 		}
 	}
 
-	// Handle empty content
-	if content == "" && len(attachments) == 0 {
-		content = "(Unsupported message type)"
-		logrus.Info("Chatwoot: Message content is empty/unsupported, using placeholder")
+	return content, false
+}
+
+func extractAttachments(data map[string]interface{}) []string {
+	attachments := make([]string, 0, len(mediaFields))
+
+	for _, field := range mediaFields {
+		mediaData, ok := data[field]
+		if !ok {
+			continue
+		}
+
+		if path, ok := mediaData.(string); ok && path != "" {
+			attachments = append(attachments, path)
+			continue
+		}
+
+		if mediaMap, ok := mediaData.(map[string]interface{}); ok {
+			if url, ok := mediaMap["url"].(string); ok && url != "" {
+				attachments = append(attachments, url)
+			}
+		}
 	}
 
-	// For group messages with attachments but no text, still prepend sender name
-	if isGroup && fromName != "" && content == "" && len(attachments) > 0 {
-		content = fromName + ": (media)"
+	return attachments
+}
+
+var skipKeys = []string{
+	"reaction",
+	"poll_update",
+}
+
+var skipMessageTypes = map[string]struct{}{
+	"protocol":                {},
+	"chat_state":              {},
+	"sender_key_distribution": {},
+	"revoked":                 {},
+	"keep_in_chat":            {},
+}
+
+func shouldSkipMessage(data map[string]interface{}) bool {
+	for _, key := range skipKeys {
+		if _, ok := data[key]; ok {
+			return true
+		}
 	}
 
-	return content, attachments
+	if typeVal, ok := data["type"].(string); ok {
+		_, skip := skipMessageTypes[typeVal]
+		return skip
+	}
+
+	return false
 }
 
 func chatwootMessageTypeFromPayload(data map[string]interface{}) string {
@@ -336,7 +428,6 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 	logrus.Infof("Chatwoot: Message synced successfully for %s", info.Identifier)
 	return nil
 }
-
 func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 	logrus.Info("Chatwoot: Attempting to forward message...")
 	cw := chatwoot.GetDefaultClient()
@@ -351,6 +442,13 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 		return
 	}
 
+	// --- NOVO BLOCO DE FILTRAGEM ---
+	if shouldSkipMessage(data) {
+		logrus.Debug("Chatwoot: Skipping message type (reaction/poll_update/etc) to prevent spam")
+		return
+	}
+	// -------------------------------
+
 	// Extract contact information
 	info, err := extractChatwootContactInfo(ctx, data)
 	if err != nil {
@@ -358,9 +456,12 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 		return
 	}
 
-	// Build message content
-	content, attachments := buildChatwootMessageContent(data, info.IsGroup, info.FromName)
-	info.IsFromMe = chatwootMessageTypeFromPayload(data) == "outgoing"
+	content, attachments, supported := buildChatwootMessageContent(data, info.IsGroup, info.FromName)
+
+	if !supported {
+		logrus.Debug("Chatwoot: Message classified as not supported for human display")
+		return
+	}
 
 	// Sync to Chatwoot
 	if err := syncMessageToChatwoot(cw, info, content, attachments); err != nil {

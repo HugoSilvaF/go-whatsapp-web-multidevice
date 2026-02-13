@@ -8,7 +8,22 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+type ChatExportState struct {
+	DeviceID       string
+	ChatJID        string
+	LastExportedAt time.Time
+	UpdatedAt      time.Time
+}
+
 type IChatStorageRepository interface {
+	IsChatwootMessageFromUs(chatwootMessageID int) (bool, error)
+
+	GetChatExportState(deviceID, chatJID string) (*ChatExportState, error)
+	UpsertChatExportState(state *ChatExportState) error
+
+	IsMessageExported(deviceID, chatJID, messageKey string) (bool, error)
+	MarkMessageExported(deviceID, chatJID, messageKey string, chatwootMessageID int) error
+
 	// Chat operations
 	CreateMessage(ctx context.Context, evt *events.Message) error
 	StoreChat(chat *Chat) error

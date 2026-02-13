@@ -3,9 +3,9 @@ package chatwoot
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +66,24 @@ func (s *SyncService) IsRunning(deviceID string) bool {
 		return progress.IsRunning()
 	}
 	return false
+}
+
+func messageKey(deviceID, chatJID string, msg *domainChatStorage.Message) string {
+	h := fnv.New64a()
+	h.Write([]byte(deviceID))
+	h.Write([]byte("|"))
+	h.Write([]byte(chatJID))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Timestamp.UTC().Format(time.RFC3339Nano)))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Sender))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Content))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.MediaType))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.URL))
+	return fmt.Sprintf("%x", h.Sum64())
 }
 
 // SyncHistory performs the initial message history sync to Chatwoot
@@ -138,16 +156,10 @@ func (s *SyncService) syncChat(
 	progress *SyncProgress,
 ) error {
 	isGroup := strings.HasSuffix(chat.JID, "@g.us")
-
-	// Skip groups if not configured
 	if isGroup && !opts.IncludeGroups {
-		logrus.Debugf("Chatwoot Sync: Skipping group %s (groups disabled)", chat.JID)
 		return nil
 	}
 
-	logrus.Infof("Chatwoot Sync: Processing chat %s (%s)", chat.Name, chat.JID)
-
-	// 1. Find or create contact in Chatwoot
 	contactName := chat.Name
 	if contactName == "" {
 		contactName = utils.ExtractPhoneFromJID(chat.JID)
@@ -155,97 +167,108 @@ func (s *SyncService) syncChat(
 
 	contact, err := s.client.FindOrCreateContact(contactName, chat.JID, isGroup)
 	if err != nil {
-		return fmt.Errorf("failed to create contact: %w", err)
+		return fmt.Errorf("failed to find/create contact: %w", err)
 	}
-	logrus.Debugf("Chatwoot Sync: Contact ID: %d", contact.ID)
 
-	// 2. Find or create conversation
 	conversation, err := s.client.FindOrCreateConversation(contact.ID)
 	if err != nil {
-		return fmt.Errorf("failed to create conversation: %w", err)
+		return fmt.Errorf("failed to find/create conversation: %w", err)
 	}
-	logrus.Debugf("Chatwoot Sync: Conversation ID: %d", conversation.ID)
 
-	// 3. Get messages since time boundary
+	state, err := s.chatStorageRepo.GetChatExportState(deviceID, chat.JID)
+	if err != nil {
+		return fmt.Errorf("failed to get export state: %w", err)
+	}
+
+	start := sinceTime
+	if state != nil && state.LastExportedAt.After(start) {
+		start = state.LastExportedAt
+	}
+
 	messages, err := s.chatStorageRepo.GetMessages(&domainChatStorage.MessageFilter{
 		DeviceID:  deviceID,
 		ChatJID:   chat.JID,
-		StartTime: &sinceTime,
+		StartTime: &start,
 		Limit:     opts.MaxMessagesPerChat,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get messages: %w", err)
 	}
-
 	if len(messages) == 0 {
-		logrus.Debugf("Chatwoot Sync: No messages to sync for %s", chat.JID)
 		return nil
 	}
 
 	progress.AddMessages(len(messages))
-	logrus.Infof("Chatwoot Sync: Found %d messages for %s", len(messages), chat.JID)
 
-	// 4. Sort messages by timestamp (oldest first for proper ordering)
 	sort.Slice(messages, func(i, j int) bool {
 		return messages[i].Timestamp.Before(messages[j].Timestamp)
 	})
 
-	// 5. Sync each message
+	var lastExported time.Time
 	for i, msg := range messages {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		err := s.syncMessage(ctx, conversation.ID, msg, waClient, opts, isGroup)
+		key := messageKey(deviceID, chat.JID, msg)
+
+		exported, err := s.chatStorageRepo.IsMessageExported(deviceID, chat.JID, key)
 		if err != nil {
-			logrus.Warnf("Chatwoot Sync: Failed to sync message %s: %v", msg.ID, err)
 			progress.IncrementFailedMessages()
-			// Continue with other messages
-		} else {
-			progress.IncrementSyncedMessages()
+			continue
+		}
+		if exported {
+			continue
 		}
 
-		// Rate limiting: pause between batches
+		chatwootMsgID, err := s.syncMessageReturnID(ctx, conversation.ID, msg, waClient, opts, isGroup)
+		if err != nil {
+			progress.IncrementFailedMessages()
+			continue
+		}
+
+		_ = s.chatStorageRepo.MarkMessageExported(deviceID, chat.JID, key, chatwootMsgID)
+		lastExported = msg.Timestamp
+
 		if i > 0 && i%opts.BatchSize == 0 {
 			time.Sleep(opts.DelayBetweenBatches)
 		}
 	}
 
-	go func() {
-		logrus.Debugf("Chatwoot Sync: Starting avatar sync for %s", chat.JID)
-		if err := s.SyncContactAvatar(ctx, chat.JID, waClient); err != nil {
-			logrus.Warnf("Failed to auto-sync avatar for %s: %v", chat.JID, err)
+	if !lastExported.IsZero() {
+		st := &domainChatStorage.ChatExportState{
+			DeviceID:       deviceID,
+			ChatJID:        chat.JID,
+			LastExportedAt: lastExported,
 		}
+		_ = s.chatStorageRepo.UpsertChatExportState(st)
+	}
+
+	go func() {
+		_ = s.SyncContactAvatarSmart(context.Background(), chat.JID, contactName, waClient)
 	}()
 
 	return nil
 }
-
-// syncMessage syncs a single message to Chatwoot
-func (s *SyncService) syncMessage(
+func (s *SyncService) syncMessageReturnID(
 	ctx context.Context,
 	conversationID int,
 	msg *domainChatStorage.Message,
 	waClient *whatsmeow.Client,
 	opts SyncOptions,
 	isGroup bool,
-) error {
-	// Determine message type: "incoming" or "outgoing"
+) (int, error) {
 	messageType := "incoming"
 	if msg.IsFromMe {
 		messageType = "outgoing"
 	}
 
-	// Build content
 	content := msg.Content
 	if content == "" && msg.MediaType != "" {
-		content = fmt.Sprintf("[%s]", msg.MediaType) // Placeholder for media-only
+		content = fmt.Sprintf("[%s]", msg.MediaType)
 	}
 
-	// Add timestamp prefix for historical context
 	timePrefix := msg.Timestamp.Format("2006-01-02 15:04")
-
-	// For group messages, add sender info
 	if isGroup && !msg.IsFromMe && msg.Sender != "" {
 		senderName := utils.ExtractPhoneFromJID(msg.Sender)
 		content = fmt.Sprintf("[%s] %s: %s", timePrefix, senderName, content)
@@ -254,36 +277,27 @@ func (s *SyncService) syncMessage(
 	}
 
 	var attachments []string
-
-	// Handle media if enabled and present
 	if opts.IncludeMedia && msg.MediaType != "" && msg.URL != "" && len(msg.MediaKey) > 0 {
-		filePath, err := s.downloadMedia(ctx, msg, waClient)
-		if err != nil {
-			logrus.Debugf("Chatwoot Sync: Failed to download media for message %s: %v", msg.ID, err)
-			// Continue without media - it might be expired
+		fp, err := s.downloadMedia(ctx, msg, waClient)
+		if err == nil && fp != "" {
+			attachments = append(attachments, fp)
+		} else {
 			content += " [media unavailable]"
-		} else if filePath != "" {
-			attachments = append(attachments, filePath)
 		}
 	}
 
-	// Send to Chatwoot and register the returned ID in the dedup cache so the
-	// resulting webhook event is recognized as "ours" and not forwarded back to WhatsApp.
-	msgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments)
+	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments)
 
 	for _, fp := range attachments {
-		if err := os.Remove(fp); err != nil {
-			logrus.Debugf("Chatwoot Sync: Failed to remove temp file %s: %v", fp, err)
-		}
+		_ = os.Remove(fp)
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to create message: %w", err)
+		return 0, err
 	}
 
-	MarkMessageAsSent(msgID)
-
-	return nil
+	MarkMessageAsSent(chatwootMsgID)
+	return chatwootMsgID, nil
 }
 
 // downloadMedia downloads media for a message and returns the temp file path
@@ -364,29 +378,6 @@ func (s *SyncService) downloadMedia(ctx context.Context, msg *domainChatStorage.
 	}
 
 	return tmpFile.Name(), nil
-}
-
-// getExtensionForMediaType returns the file extension for a media type
-func getExtensionForMediaType(mediaType, filename string) string {
-	if filename != "" {
-		if ext := filepath.Ext(filename); ext != "" {
-			return ext
-		}
-	}
-	switch mediaType {
-	case "image":
-		return ".jpg"
-	case "video":
-		return ".mp4"
-	case "audio", "ptt":
-		return ".ogg"
-	case "document":
-		return ".bin"
-	case "sticker":
-		return ".webp"
-	default:
-		return ""
-	}
 }
 
 // Global sync service instance for REST endpoints
