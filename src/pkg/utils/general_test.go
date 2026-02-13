@@ -406,9 +406,11 @@ func (suite *UtilsTestSuite) TestDownloadImageFromURLEdgeCases() {
 func (suite *UtilsTestSuite) TestDownloadAudioFromURL() {
 	// Mock original config values
 	origMaxSize := config.WhatsappSettingMaxDownloadSize
+	origChatwootURL := config.ChatwootURL
 	config.WhatsappSettingMaxDownloadSize = 1024 * 1024 // 1MB for testing
 	defer func() {
 		config.WhatsappSettingMaxDownloadSize = origMaxSize
+		config.ChatwootURL = origChatwootURL
 	}()
 
 	// Test successful audio download
@@ -480,6 +482,26 @@ func (suite *UtilsTestSuite) TestDownloadAudioFromURL() {
 	_, _, err = utils.DownloadAudioFromURL(errorServer.URL + "/error.mp3")
 	assert.Error(suite.T(), err)
 	assert.Contains(suite.T(), err.Error(), "HTTP request failed")
+
+	// Test fallback for Chatwoot ActiveStorage URL when public URL fails
+	failingPublicServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer failingPublicServer.Close()
+
+	internalChatwootServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(suite.T(), "/rails/active_storage/blobs/redirect/token/test.mp3", r.URL.Path)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Write([]byte("fallback audio"))
+	}))
+	defer internalChatwootServer.Close()
+
+	config.ChatwootURL = internalChatwootServer.URL
+	data, filename, err = utils.DownloadAudioFromURL(failingPublicServer.URL + "/rails/active_storage/blobs/redirect/token/test.mp3")
+	assert.NoError(suite.T(), err)
+	assert.Equal(suite.T(), "test.mp3", filename)
+	assert.Equal(suite.T(), []byte("fallback audio"), data)
+	config.ChatwootURL = origChatwootURL
 
 	// Test filename without extension (should generate timestamp-based name)
 	data, filename, err = utils.DownloadAudioFromURL(server.URL + "/no-filename/")

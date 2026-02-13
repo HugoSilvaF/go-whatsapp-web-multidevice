@@ -299,81 +299,139 @@ func DownloadAudioFromURL(audioURL string) ([]byte, string, error) {
 		},
 	}
 
-	resp, err := client.Get(audioURL)
+	candidateURLs := buildDownloadFallbackURLs(audioURL)
+	var lastErr error
+
+	for _, candidateURL := range candidateURLs {
+		resp, err := client.Get(candidateURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("HTTP request failed with status: %s", resp.Status)
+			resp.Body.Close()
+			continue
+		}
+
+		// Extract only the MIME type portion (ignore parameters like charset)
+		contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+
+		// Align audio MIME validation with the one used for uploaded files to ensure consistency with WhatsApp requirements.
+		allowedMimes := map[string]bool{
+			"audio/aac":          true,
+			"audio/amr":          true,
+			"audio/flac":         true,
+			"audio/m4a":          true,
+			"audio/m4r":          true,
+			"audio/mp3":          true,
+			"audio/mpeg":         true,
+			"audio/ogg":          true,
+			"audio/wma":          true,
+			"audio/x-ms-wma":     true,
+			"audio/wav":          true,
+			"audio/vnd.wav":      true,
+			"audio/vnd.wave":     true,
+			"audio/wave":         true,
+			"audio/x-pn-wav":     true,
+			"audio/x-wav":        true,
+			"video/mp4":          true, // Sometimes audio is served as mp4
+			"application/ogg":    true, // Ogg audio
+			"application/x-mpeg": true,
+			"audio/webm":         true, // WebM audio
+			"video/webm":         true, // WebM audio/video
+			"audio/mp4":          true,
+		}
+
+		// If content type is generic or not in list, just warn but allow download (let WhatsApp reject if invalid)
+		if !allowedMimes[contentType] {
+			logrus.Warnf("DownloadAudioFromURL: unexpected content type '%s', proceeding anyway", contentType)
+		}
+
+		// Validate content length when it is provided by the server.
+		maxSize := config.WhatsappSettingMaxDownloadSize
+		if resp.ContentLength > 0 && resp.ContentLength > maxSize {
+			resp.Body.Close()
+			return nil, "", fmt.Errorf("audio size %d exceeds maximum allowed size %d", resp.ContentLength, maxSize)
+		}
+
+		// Guard against servers that do not set Content-Length by reading at most (maxSize+1) bytes
+		// and erroring if the limit is exceeded.
+		limit := maxSize
+		if limit < math.MaxInt64 {
+			limit++
+		}
+
+		limitedReader := &io.LimitedReader{R: resp.Body, N: limit}
+		audioData, err := io.ReadAll(limitedReader)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if int64(len(audioData)) > maxSize {
+			return nil, "", fmt.Errorf("downloaded audio size of %d bytes exceeds the maximum allowed size of %d bytes", len(audioData), maxSize)
+		}
+
+		// Derive filename from URL path (strip query parameters if present)
+		segments := strings.Split(audioURL, "/")
+		fileName := segments[len(segments)-1]
+		fileName = strings.Split(fileName, "?")[0]
+		if fileName == "" {
+			fileName = fmt.Sprintf("audio_%d", time.Now().Unix())
+		}
+
+		return audioData, fileName, nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unable to download audio from URL")
+	}
+	return nil, "", lastErr
+}
+
+func buildDownloadFallbackURLs(sourceURL string) []string {
+	candidates := []string{sourceURL}
+
+	if config.ChatwootURL == "" {
+		return candidates
+	}
+
+	parsedSourceURL, err := url.Parse(sourceURL)
 	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("HTTP request failed with status: %s", resp.Status)
+		return candidates
 	}
 
-	// Extract only the MIME type portion (ignore parameters like charset)
-	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
-
-	// Align audio MIME validation with the one used for uploaded files to ensure consistency with WhatsApp requirements.
-	allowedMimes := map[string]bool{
-		"audio/aac":          true,
-		"audio/amr":          true,
-		"audio/flac":         true,
-		"audio/m4a":          true,
-		"audio/m4r":          true,
-		"audio/mp3":          true,
-		"audio/mpeg":         true,
-		"audio/ogg":          true,
-		"audio/wma":          true,
-		"audio/x-ms-wma":     true,
-		"audio/wav":          true,
-		"audio/vnd.wav":      true,
-		"audio/vnd.wave":     true,
-		"audio/wave":         true,
-		"audio/x-pn-wav":     true,
-		"audio/x-wav":        true,
-		"video/mp4":          true, // Sometimes audio is served as mp4
-		"application/ogg":    true, // Ogg audio
-		"application/x-mpeg": true,
-		"audio/webm":         true, // WebM audio
-		"video/webm":         true, // WebM audio/video
-		"audio/mp4":          true,
+	if !strings.HasPrefix(parsedSourceURL.Path, "/rails/active_storage/") {
+		return candidates
 	}
 
-	// If content type is generic or not in list, just warn but allow download (let WhatsApp reject if invalid)
-	if !allowedMimes[contentType] {
-		logrus.Warnf("DownloadAudioFromURL: unexpected content type '%s', proceeding anyway", contentType)
+	parsedChatwootURL, err := url.Parse(config.ChatwootURL)
+	if err != nil || parsedChatwootURL.Scheme == "" || parsedChatwootURL.Host == "" {
+		return candidates
 	}
 
-	// Validate content length when it is provided by the server.
-	maxSize := config.WhatsappSettingMaxDownloadSize
-	if resp.ContentLength > 0 && resp.ContentLength > maxSize {
-		return nil, "", fmt.Errorf("audio size %d exceeds maximum allowed size %d", resp.ContentLength, maxSize)
+	if strings.EqualFold(parsedSourceURL.Scheme, parsedChatwootURL.Scheme) && strings.EqualFold(parsedSourceURL.Host, parsedChatwootURL.Host) {
+		return candidates
 	}
 
-	// Guard against servers that do not set Content-Length by reading at most (maxSize+1) bytes
-	// and erroring if the limit is exceeded.
-	limit := maxSize
-	if limit < math.MaxInt64 {
-		limit++
+	fallbackURL := *parsedSourceURL
+	fallbackURL.Scheme = parsedChatwootURL.Scheme
+	fallbackURL.Host = parsedChatwootURL.Host
+
+	chatwootBasePath := strings.TrimSuffix(parsedChatwootURL.Path, "/")
+	if chatwootBasePath != "" && !strings.HasPrefix(fallbackURL.Path, chatwootBasePath+"/") {
+		fallbackURL.Path = chatwootBasePath + fallbackURL.Path
 	}
 
-	limitedReader := &io.LimitedReader{R: resp.Body, N: limit}
-	audioData, err := io.ReadAll(limitedReader)
-	if err != nil {
-		return nil, "", err
-	}
-	if int64(len(audioData)) > maxSize {
-		return nil, "", fmt.Errorf("downloaded audio size of %d bytes exceeds the maximum allowed size of %d bytes", len(audioData), maxSize)
-	}
+	candidates = append(candidates, fallbackURL.String())
+	logrus.WithFields(logrus.Fields{
+		"source_url":   sourceURL,
+		"fallback_url": fallbackURL.String(),
+	}).Debug("DownloadAudioFromURL: added Chatwoot internal URL fallback")
 
-	// Derive filename from URL path (strip query parameters if present)
-	segments := strings.Split(audioURL, "/")
-	fileName := segments[len(segments)-1]
-	fileName = strings.Split(fileName, "?")[0]
-	if fileName == "" {
-		fileName = fmt.Sprintf("audio_%d", time.Now().Unix())
-	}
-
-	return audioData, fileName, nil
+	return candidates
 }
 
 // DownloadVideoFromURL downloads a video file from the provided URL and returns the bytes and sanitized filename.
