@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
@@ -108,7 +107,7 @@ func (s *SyncService) SyncContactAvatarSmart(
 			"waha_whatsapp_jid":      contactJID,
 			"waha_avatar_checked_at": time.Now().UTC().Format(time.RFC3339),
 		}
-		_ = s.client.UpdateContactAttributes(contact.ID, contactJID, attrs)
+		_ = s.client.UpdateContactAttributes(contact.ID, contactJID, attrs, isGroup)
 		return nil
 	}
 
@@ -121,7 +120,7 @@ func (s *SyncService) SyncContactAvatarSmart(
 			"waha_whatsapp_jid":      contactJID,
 			"waha_avatar_checked_at": time.Now().UTC().Format(time.RFC3339),
 		}
-		_ = s.client.UpdateContactAttributes(contact.ID, contactJID, attrs)
+		_ = s.client.UpdateContactAttributes(contact.ID, contactJID, attrs, isGroup)
 		return nil
 	}
 

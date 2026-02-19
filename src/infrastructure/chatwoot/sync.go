@@ -423,7 +423,7 @@ func (s *SyncService) SyncContactAvatar(ctx context.Context, contactJID string, 
 		attrs := map[string]interface{}{
 			"waha_whatsapp_jid": contactJID,
 		}
-		if err := s.client.UpdateContactAttributes(contact.ID, contactJID, attrs); err != nil {
+		if err := s.client.UpdateContactAttributes(contact.ID, contactJID, attrs, isGroup); err != nil {
 			logrus.Warnf("Chatwoot Sync: Failed to update contact attributes for %s: %v", contactJID, err)
 			// Não retorna erro fatal, tenta atualizar a foto mesmo assim
 		} else {

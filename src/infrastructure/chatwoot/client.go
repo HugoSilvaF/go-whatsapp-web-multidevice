@@ -49,14 +49,6 @@ func newShardLocks(n int) *shardLocks {
 	return s
 }
 
-func fnv32a(s string) uint32 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
-}
 
 func (l *shardLocks) lock(key string) func() {
 	idx := int(fnv32a(key) % uint32(len(l.shards)))
@@ -64,8 +56,6 @@ func (l *shardLocks) lock(key string) func() {
 	<-ch
 	return func() { ch <- struct{}{} }
 }
-
-var contactLocks = newShardLocks(64)
 
 func GetDefaultClient() *Client {
 	defaultClientOnce.Do(func() {
