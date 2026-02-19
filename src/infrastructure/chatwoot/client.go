@@ -32,15 +32,41 @@ var (
 	defaultClient     *Client
 	defaultClientOnce sync.Once
 
-	// sentMessageIDs tracks Chatwoot message IDs created by our API to prevent
-	// echo loops: WhatsApp msg → synced to Chatwoot → Chatwoot webhook fires →
-	// would re-send to WhatsApp without this guard.
 	sentMessageIDs    sync.Map
 	sentMessageIDsTTL = 5 * time.Minute
 )
 
-// GetDefaultClient returns a shared Chatwoot client instance.
-// Uses lazy initialization with sync.Once for thread safety.
+type shardLocks struct {
+	shards []chan struct{}
+}
+
+func newShardLocks(n int) *shardLocks {
+	s := &shardLocks{shards: make([]chan struct{}, n)}
+	for i := 0; i < n; i++ {
+		s.shards[i] = make(chan struct{}, 1)
+		s.shards[i] <- struct{}{}
+	}
+	return s
+}
+
+func fnv32a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func (l *shardLocks) lock(key string) func() {
+	idx := int(fnv32a(key) % uint32(len(l.shards)))
+	ch := l.shards[idx]
+	<-ch
+	return func() { ch <- struct{}{} }
+}
+
+var contactLocks = newShardLocks(64)
+
 func GetDefaultClient() *Client {
 	defaultClientOnce.Do(func() {
 		defaultClient = NewClient()
@@ -68,9 +94,6 @@ func IsMessageSentByUs(messageID int) bool {
 		sentMessageIDs.Delete(messageID)
 		return false
 	}
-	// Don't delete on check — Chatwoot may fire multiple webhook events
-	// (e.g. message_created + conversation_updated) for the same message.
-	// Entries are cleaned up by the background sweeper after TTL expires.
 	return true
 }
 
@@ -92,7 +115,7 @@ func init() {
 func NewClient() *Client {
 	return &Client{
 		BaseURL:   strings.TrimRight(config.ChatwootURL, "/"),
-		APIToken:  config.ChatwootAPIToken,
+		APIToken: config.ChatwootAPIToken,
 		AccountID: config.ChatwootAccountID,
 		InboxID:   config.ChatwootInboxID,
 		HTTPClient: &http.Client{
@@ -105,9 +128,6 @@ func (c *Client) IsConfigured() bool {
 	return c.BaseURL != "" && c.APIToken != "" && c.AccountID != 0 && c.InboxID != 0
 }
 
-// doRequest executes an HTTP request with common headers and error handling.
-// It marshals the payload to JSON (if provided), sets auth headers, executes the request,
-// and decodes the response into result (if provided).
 func (c *Client) doRequest(method, endpoint string, payload interface{}, result interface{}) ([]byte, error) {
 	var body io.Reader
 	if payload != nil {
@@ -155,6 +175,7 @@ func (c *Client) doRequest(method, endpoint string, payload interface{}, result 
 func (c *Client) FindContactByIdentifier(identifier string, isGroup bool) (*Contact, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/search", c.BaseURL, c.AccountID)
 	logrus.Debugf("Chatwoot: Finding contact by identifier endpoint=%s identifier=%s isGroup=%v", endpoint, identifier, isGroup)
+
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -189,18 +210,24 @@ func (c *Client) FindContactByIdentifier(identifier string, isGroup bool) (*Cont
 		return nil, err
 	}
 
-	// For groups, match by Identifier field or custom attribute waha_whatsapp_jid
-	// For private chats, match by phone number
 	for _, contact := range result.Payload {
 		if isIdentifierBased {
 			if contact.Identifier == identifier {
 				return &contact, nil
 			}
-			if jid, ok := contact.CustomAttributes["waha_whatsapp_jid"].(string); ok && jid == identifier {
-				return &contact, nil
+			if contact.CustomAttributes != nil {
+				if jid, ok := contact.CustomAttributes["waha_whatsapp_jid"].(string); ok && jid == identifier {
+					return &contact, nil
+				}
 			}
-		} else {
-			if contact.PhoneNumber == searchTerm {
+			continue
+		}
+
+		if contact.PhoneNumber == searchTerm {
+			return &contact, nil
+		}
+		if contact.CustomAttributes != nil {
+			if jid, ok := contact.CustomAttributes["waha_whatsapp_jid"].(string); ok && jid == identifier {
 				return &contact, nil
 			}
 		}
@@ -209,49 +236,12 @@ func (c *Client) FindContactByIdentifier(identifier string, isGroup bool) (*Cont
 	return nil, nil
 }
 
-func (c *Client) UploadAvatar(contactID int, imageBytes []byte) error {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// O campo no form-data deve se chamar "avatar"
-	part, err := writer.CreateFormFile("avatar", "avatar.png")
-	if err != nil {
-		return err
-	}
-	part.Write(imageBytes)
-	writer.Close()
-
-	url := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d/avatar", c.BaseURL, c.AccountID, contactID)
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("api_access_token", c.APIToken) // Sua API Key do Chatwoot
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("falha no upload: status %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
 func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts", c.BaseURL, c.AccountID)
 
-	// For groups, use Identifier field
-	// For private chats, use E.164 phone format
-	// For @lid JIDs (non-phone WhatsApp IDs), use Identifier field
 	var phoneNumber, contactIdentifier string
-	if isGroup || strings.HasSuffix(identifier, "@lid") {
+	isIdentifierBased := isGroup || strings.HasSuffix(identifier, "@lid")
+	if isIdentifierBased {
 		contactIdentifier = identifier
 	} else {
 		phoneNumber = utils.NormalizePhoneE164(identifier)
@@ -271,7 +261,9 @@ func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact,
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal contact payload: %w", err)
 	}
+
 	logrus.Debugf("Chatwoot CreateContact: Sending payload: %s", string(jsonPayload))
+
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return nil, err
@@ -289,12 +281,14 @@ func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact,
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	logrus.Debugf("Chatwoot CreateContact: Response status=%d body=%s", resp.StatusCode, string(bodyBytes))
 
-	// Chatwoot returns 200 OK for contacts
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		existing, findErr := c.FindContactByIdentifier(identifier, isGroup)
+		if findErr == nil && existing != nil {
+			return existing, nil
+		}
 		return nil, fmt.Errorf("failed to create contact: status %d body %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Chatwoot API returns: {"payload": {"contact": {...}, "contact_inbox": {...}}}
 	var nestedResult struct {
 		Payload struct {
 			Contact Contact `json:"contact"`
@@ -304,7 +298,6 @@ func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact,
 		return &nestedResult.Payload.Contact, nil
 	}
 
-	// Fallback: some Chatwoot versions return {"payload": Contact{...}} directly
 	var flatResult struct {
 		Payload Contact `json:"payload"`
 	}
@@ -312,7 +305,6 @@ func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact,
 		return &flatResult.Payload, nil
 	}
 
-	// Last resort: try direct decode (contact at root level)
 	var contact Contact
 	if err := json.Unmarshal(bodyBytes, &contact); err == nil && contact.ID != 0 {
 		return &contact, nil
@@ -322,26 +314,48 @@ func (c *Client) CreateContact(name, identifier string, isGroup bool) (*Contact,
 }
 
 func (c *Client) FindOrCreateContact(name, identifier string, isGroup bool) (*Contact, error) {
+	unlock := contactLocks.lock(identifier)
+	defer unlock()
+
 	contact, err := c.FindContactByIdentifier(identifier, isGroup)
 	if err != nil {
 		return nil, err
 	}
+
 	if contact != nil {
-		// Update contact name if it has changed (e.g., group name changed)
 		if contact.Name != name && name != "" {
 			logrus.Infof("Chatwoot: Updating contact name from '%s' to '%s'", contact.Name, name)
 			if err := c.UpdateContactName(contact.ID, name); err != nil {
 				logrus.Warnf("Chatwoot: Failed to update contact name: %v", err)
-				// Continue anyway, the old name is still usable
+			} else {
+				contact.Name = name
 			}
-			contact.Name = name
 		}
+
+		if contact.CustomAttributes == nil {
+			contact.CustomAttributes = map[string]interface{}{}
+		}
+		if _, ok := contact.CustomAttributes["waha_whatsapp_jid"].(string); !ok {
+			attrs := map[string]interface{}{
+				"waha_whatsapp_jid": identifier,
+			}
+			_ = c.UpdateContactAttributes(contact.ID, identifier, attrs, isGroup)
+		}
+
 		return contact, nil
 	}
-	return c.CreateContact(name, identifier, isGroup)
+
+	created, err := c.CreateContact(name, identifier, isGroup)
+	if err != nil {
+		again, findErr := c.FindContactByIdentifier(identifier, isGroup)
+		if findErr == nil && again != nil {
+			return again, nil
+		}
+		return nil, err
+	}
+	return created, nil
 }
 
-// UpdateContactName updates the name of an existing contact
 func (c *Client) UpdateContactName(contactID int, name string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d", c.BaseURL, c.AccountID, contactID)
 
@@ -353,6 +367,7 @@ func (c *Client) UpdateContactName(contactID int, name string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal update payload: %w", err)
 	}
+
 	req, err := http.NewRequest("PUT", endpoint, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return err
@@ -375,8 +390,92 @@ func (c *Client) UpdateContactName(contactID int, name string) error {
 	return nil
 }
 
+func (c *Client) UploadAvatar(contactID int, imageBytes []byte) error {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("avatar", "avatar.png")
+	if err != nil {
+		return err
+	}
+	_, _ = part.Write(imageBytes)
+	_ = writer.Close()
+
+	url := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d/avatar", c.BaseURL, c.AccountID, contactID)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("api_access_token", c.APIToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("falha no upload: status %d body %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+func (c *Client) CreateConversation(contactID int) (*Conversation, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations", c.BaseURL, c.AccountID)
+
+	payload := CreateConversationRequest{
+		InboxID:   c.InboxID,
+		ContactID: contactID,
+		Status:    "open",
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal conversation payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("api_access_token", c.APIToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to create conversation: status %d body %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	logrus.Debugf("Chatwoot CreateConversation: Response body=%s", string(bodyBytes))
+
+	var result struct {
+		Payload Conversation `json:"payload"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err == nil && result.Payload.ID != 0 {
+		return &result.Payload, nil
+	}
+
+	var conversation Conversation
+	if err := json.Unmarshal(bodyBytes, &conversation); err == nil && conversation.ID != 0 {
+		return &conversation, nil
+	}
+
+	return nil, fmt.Errorf("failed to decode conversation response (no valid ID found): %s", string(bodyBytes))
+}
+
 func (c *Client) FindConversation(contactID int) (*Conversation, error) {
-	// Use contact-specific conversations endpoint for accurate results
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d/conversations", c.BaseURL, c.AccountID, contactID)
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -408,7 +507,6 @@ func (c *Client) FindConversation(contactID int) (*Conversation, error) {
 		return nil, err
 	}
 
-	// Find an open conversation for this inbox
 	for _, conv := range result.Payload {
 		if conv.InboxID == c.InboxID && conv.Status != "resolved" {
 			return &Conversation{
@@ -421,56 +519,6 @@ func (c *Client) FindConversation(contactID int) (*Conversation, error) {
 	}
 
 	return nil, nil
-}
-
-func (c *Client) CreateConversation(contactID int) (*Conversation, error) {
-	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations", c.BaseURL, c.AccountID)
-
-	payload := CreateConversationRequest{
-		InboxID:   c.InboxID,
-		ContactID: contactID,
-		Status:    "open",
-	}
-
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal conversation payload: %w", err)
-	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonPayload))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api_access_token", c.APIToken)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to create conversation: status %d body %s", resp.StatusCode, string(body))
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	logrus.Debugf("Chatwoot CreateConversation: Response body=%s", string(bodyBytes))
-
-	var result struct {
-		Payload Conversation `json:"payload"`
-	}
-	if err := json.Unmarshal(bodyBytes, &result); err == nil && result.Payload.ID != 0 {
-		return &result.Payload, nil
-	}
-
-	var conversation Conversation
-	if err := json.Unmarshal(bodyBytes, &conversation); err == nil && conversation.ID != 0 {
-		return &conversation, nil
-	}
-
-	return nil, fmt.Errorf("failed to decode conversation response (no valid ID found): %s", string(bodyBytes))
 }
 
 func (c *Client) FindOrCreateConversation(contactID int) (*Conversation, error) {
@@ -501,6 +549,7 @@ func (c *Client) CreateMessage(conversationID int, content string, messageType s
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal message payload: %w", err)
 	}
+
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return 0, err
@@ -543,8 +592,6 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 	recordedAudioSeen := make(map[string]struct{}, len(attachments))
 
 	for _, filePath := range attachments {
-		// Process each file in a closure to ensure proper cleanup of file handles
-		// This prevents file descriptor leaks when processing multiple attachments
 		func(fp string) {
 			uploadPath, cleanup := prepareAttachmentForUpload(fp)
 			defer cleanup()
@@ -579,9 +626,9 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 					recordedAudioFilenames = append(recordedAudioFilenames, fileName)
 				}
 			}
+
 			logrus.Debugf("Chatwoot: attachment prepared filename=%s mime=%s path=%s", fileName, mimeType, uploadPath)
 
-			// Custom form part with correct Content-Type for Chatwoot to render images inline
 			h := make(textproto.MIMEHeader)
 			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="attachments[]"; filename="%s"`, fileName))
 			h.Set("Content-Type", mimeType)
@@ -631,6 +678,7 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("failed to create message with attachments: status %d body %s", resp.StatusCode, string(respBody))
 	}
+
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		bodyForLog := string(respBody)
 		if len(bodyForLog) > 2048 {
@@ -649,7 +697,6 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 	return 0, nil
 }
 
-// UpdateContactAvatar faz o upload da foto de perfil para o contato no Chatwoot
 func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d", c.BaseURL, c.AccountID, contactID)
 
@@ -663,12 +710,10 @@ func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
 		ext = ".png"
 	}
 
-	// 3. Criar o cabeçalho MIME manualmente
 	h := make(textproto.MIMEHeader)
 	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="avatar"; filename="profile%s"`, ext))
 	h.Set("Content-Type", contentType)
 
-	// 4. Usar CreatePart em vez de CreateFormFile
 	part, err := writer.CreatePart(h)
 	if err != nil {
 		return fmt.Errorf("failed to create form part: %w", err)
@@ -704,13 +749,12 @@ func (c *Client) UpdateContactAvatar(contactID int, avatarData []byte) error {
 	return nil
 }
 
-// UpdateContactAttributes atualiza o identifier (JID) e atributos personalizados
-func (c *Client) UpdateContactAttributes(contactID int, identifier string, customAttributes map[string]interface{}) error {
+func (c *Client) UpdateContactAttributes(contactID int, identifier string, customAttributes map[string]interface{}, isGroup bool) error {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/contacts/%d", c.BaseURL, c.AccountID, contactID)
 
 	payload := map[string]interface{}{}
 
-	if identifier != "" {
+	if identifier != "" && (isGroup || strings.HasSuffix(identifier, "@lid")) {
 		payload["identifier"] = identifier
 	}
 

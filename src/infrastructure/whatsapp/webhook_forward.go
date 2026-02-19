@@ -17,28 +17,19 @@ import (
 
 var submitWebhookFn = submitWebhook
 
-// mutexShardCount is the number of mutex shards for contact synchronization.
-// Using a fixed array avoids memory growth from sync.Map while still providing
-// reasonable concurrency (64 shards means max 64 concurrent contact operations).
 const mutexShardCount = 64
 
-// contactMutexShards provides sharded locks to prevent race conditions when creating Chatwoot contacts.
-// This approach prevents memory leaks that would occur with a sync.Map that grows indefinitely.
 var contactMutexShards [mutexShardCount]sync.Mutex
 
-// groupNameCacheEntry holds cached group name with expiration time
 type groupNameCacheEntry struct {
 	name      string
 	expiresAt time.Time
 }
 
 var (
-	// groupNameCache provides TTL-based caching for group names to reduce WhatsApp API calls
 	groupNameCache    sync.Map
 	groupNameCacheTTL = 5 * time.Minute
 
-	// chatwootForwardDeduper prevents duplicate forwarding of the same WhatsApp message ID.
-	// This guards against duplicate event-handler invocations for the same inbound event.
 	chatwootForwardDeduper = struct {
 		mu   sync.Mutex
 		seen map[string]time.Time
@@ -48,21 +39,17 @@ var (
 	chatwootForwardDeduperTTL = 2 * time.Minute
 )
 
-// getCachedGroupName retrieves group name from cache if not expired.
-// Returns empty string and false if not cached or expired.
 func getCachedGroupName(groupJID string) (string, bool) {
 	if entry, ok := groupNameCache.Load(groupJID); ok {
 		cached := entry.(groupNameCacheEntry)
 		if time.Now().Before(cached.expiresAt) {
 			return cached.name, true
 		}
-		// Entry expired, delete it
 		groupNameCache.Delete(groupJID)
 	}
 	return "", false
 }
 
-// setCachedGroupName stores group name in cache with TTL.
 func setCachedGroupName(groupJID, name string) {
 	groupNameCache.Store(groupJID, groupNameCacheEntry{
 		name:      name,
@@ -70,19 +57,13 @@ func setCachedGroupName(groupJID, name string) {
 	})
 }
 
-// getContactMutex returns a mutex for the given phone number to serialize contact operations.
-// Uses FNV-1a hash to distribute phones across shards for balanced lock contention.
 func getContactMutex(phone string) *sync.Mutex {
 	h := fnv.New32a()
-	h.Write([]byte(phone))
+	_, _ = h.Write([]byte(phone))
 	return &contactMutexShards[h.Sum32()%mutexShardCount]
 }
 
-// forwardPayloadToConfiguredWebhooks attempts to deliver the provided payload to every configured webhook URL.
-// It only returns an error when all webhook deliveries fail. Partial failures are logged and suppressed so
-// successful targets still receive the event.
 func forwardPayloadToConfiguredWebhooks(ctx context.Context, payload map[string]any, eventName string) error {
-	// Check if event is whitelisted (if whitelist is configured)
 	if len(config.WhatsappWebhookEvents) > 0 {
 		if !isEventWhitelisted(eventName) {
 			logrus.Debugf("Skipping event %s - not in webhook events whitelist", eventName)
@@ -122,7 +103,6 @@ func forwardToWebhooks(ctx context.Context, payload map[string]any, eventName st
 
 	if len(failed) > 0 {
 		logrus.Warnf("Some webhook URLs failed for %s (succeeded: %d/%d): %s", eventName, successes, total, strings.Join(failed, "; "))
-		// Return error only if ALL webhooks failed
 		if successes == 0 {
 			return fmt.Errorf("all %d webhook(s) failed for %s", total, eventName)
 		}
@@ -133,7 +113,6 @@ func forwardToWebhooks(ctx context.Context, payload map[string]any, eventName st
 	return nil
 }
 
-// chatwootContactInfo holds extracted contact information for Chatwoot sync
 type chatwootContactInfo struct {
 	Identifier string
 	Name       string
@@ -142,9 +121,6 @@ type chatwootContactInfo struct {
 	IsFromMe   bool
 }
 
-// extractChatwootContactInfo extracts contact identifier and name from message payload.
-// For groups, uses the group JID as identifier and tries to fetch group name.
-// For private chats, uses the sender's phone number.
 func extractChatwootContactInfo(ctx context.Context, data map[string]interface{}) (*chatwootContactInfo, error) {
 	from, _ := data["from"].(string)
 	fromName, _ := data["from_name"].(string)
@@ -161,6 +137,7 @@ func extractChatwootContactInfo(ctx context.Context, data map[string]interface{}
 	info := &chatwootContactInfo{
 		IsGroup:  isGroup,
 		FromName: fromName,
+		IsFromMe: isFromMe,
 	}
 
 	if isGroup {
@@ -213,7 +190,6 @@ func buildChatwootMessageContent(data map[string]interface{}, isGroup bool, from
 	attachments := extractAttachments(data)
 
 	supported, fallback := classifyMessageSupport(data, content, attachments)
-
 	if !supported {
 		return "", nil, false
 	}
@@ -404,9 +380,7 @@ func extractPhoneFromVCard(vcard string) string {
 	return ""
 }
 
-// syncMessageToChatwoot creates or finds contact/conversation and sends the message.
 func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, content string, attachments []string) error {
-	// Lock per-identifier mutex to prevent duplicate contact/conversation creation
 	mu := getContactMutex(info.Identifier)
 	mu.Lock()
 
@@ -429,6 +403,7 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 	if info.IsFromMe {
 		messageType = "outgoing"
 	}
+
 	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, attachments)
 	if err != nil {
 		return fmt.Errorf("failed to create message: %w", err)
@@ -438,6 +413,7 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 	logrus.Infof("Chatwoot: Message synced successfully for %s", info.Identifier)
 	return nil
 }
+
 func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 	logrus.Info("Chatwoot: Attempting to forward message...")
 	cw := chatwoot.GetDefaultClient()
@@ -459,14 +435,11 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 		}
 	}
 
-	// --- NOVO BLOCO DE FILTRAGEM ---
 	if shouldSkipMessage(data) {
 		logrus.Debug("Chatwoot: Skipping message type (reaction/poll_update/etc) to prevent spam")
 		return
 	}
-	// -------------------------------
 
-	// Extract contact information
 	info, err := extractChatwootContactInfo(ctx, data)
 	if err != nil {
 		logrus.Warnf("Chatwoot: Skipping message: %v", err)
@@ -474,13 +447,11 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 	}
 
 	content, attachments, supported := buildChatwootMessageContent(data, info.IsGroup, info.FromName)
-
 	if !supported {
 		logrus.Debug("Chatwoot: Message classified as not supported for human display")
 		return
 	}
 
-	// Sync to Chatwoot
 	if err := syncMessageToChatwoot(cw, info, content, attachments); err != nil {
 		logrus.Errorf("Chatwoot: %v", err)
 	}
@@ -492,7 +463,6 @@ func isDuplicateChatwootForward(messageID string) bool {
 	chatwootForwardDeduper.mu.Lock()
 	defer chatwootForwardDeduper.mu.Unlock()
 
-	// Opportunistic cleanup of expired entries.
 	for id, ts := range chatwootForwardDeduper.seen {
 		if now.Sub(ts) > chatwootForwardDeduperTTL {
 			delete(chatwootForwardDeduper.seen, id)
@@ -509,7 +479,6 @@ func isDuplicateChatwootForward(messageID string) bool {
 	return false
 }
 
-// isEventWhitelisted checks if the given event name is in the configured whitelist
 func isEventWhitelisted(eventName string) bool {
 	for _, allowed := range config.WhatsappWebhookEvents {
 		if strings.EqualFold(strings.TrimSpace(allowed), eventName) {
@@ -519,10 +488,7 @@ func isEventWhitelisted(eventName string) bool {
 	return false
 }
 
-// getGroupName fetches the group name from WhatsApp using the group JID.
-// Uses a TTL cache to avoid repeated API calls for the same group.
 func getGroupName(ctx context.Context, groupJID string) string {
-	// Check cache first
 	if name, ok := getCachedGroupName(groupJID); ok {
 		logrus.Debugf("Chatwoot: Using cached group name for %s: %s", groupJID, name)
 		return name
@@ -544,8 +510,6 @@ func getGroupName(ctx context.Context, groupJID string) string {
 		return ""
 	}
 
-	// Use a fresh context with timeout since the original context may be canceled
-	// (this function is called from a goroutine)
 	freshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -558,7 +522,6 @@ func getGroupName(ctx context.Context, groupJID string) string {
 
 	if groupInfo != nil && groupInfo.Name != "" {
 		logrus.Infof("Chatwoot: Got group name: %s", groupInfo.Name)
-		// Cache the result
 		setCachedGroupName(groupJID, groupInfo.Name)
 		return groupInfo.Name
 	}
