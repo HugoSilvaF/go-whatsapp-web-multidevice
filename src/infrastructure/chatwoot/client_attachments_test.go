@@ -52,7 +52,7 @@ func TestCreateMessageWithAttachments_SendsRecordedAudioField(t *testing.T) {
 		},
 	}
 
-	msgID, err := c.CreateMessage(123, "audio", "incoming", []string{audioPath})
+	msgID, err := c.CreateMessage(123, "audio", "incoming", []string{audioPath}, "")
 	if err != nil {
 		t.Fatalf("CreateMessage returned error: %v", err)
 	}

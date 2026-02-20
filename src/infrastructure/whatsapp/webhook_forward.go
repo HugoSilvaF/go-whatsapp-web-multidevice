@@ -404,7 +404,7 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 		messageType = "outgoing"
 	}
 
-	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, attachments)
+	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, attachments, info.Identifier)
 	if err != nil {
 		return fmt.Errorf("failed to create message: %w", err)
 	}

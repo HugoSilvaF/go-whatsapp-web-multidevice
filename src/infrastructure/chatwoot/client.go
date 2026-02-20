@@ -49,7 +49,6 @@ func newShardLocks(n int) *shardLocks {
 	return s
 }
 
-
 func (l *shardLocks) lock(key string) func() {
 	idx := int(fnv32a(key) % uint32(len(l.shards)))
 	ch := l.shards[idx]
@@ -105,7 +104,7 @@ func init() {
 func NewClient() *Client {
 	return &Client{
 		BaseURL:   strings.TrimRight(config.ChatwootURL, "/"),
-		APIToken: config.ChatwootAPIToken,
+		APIToken:  config.ChatwootAPIToken,
 		AccountID: config.ChatwootAccountID,
 		InboxID:   config.ChatwootInboxID,
 		HTTPClient: &http.Client{
@@ -522,17 +521,44 @@ func (c *Client) FindOrCreateConversation(contactID int) (*Conversation, error) 
 	return c.CreateConversation(contactID)
 }
 
-func (c *Client) CreateMessage(conversationID int, content string, messageType string, attachments []string) (int, error) {
+func (c *Client) DeleteMessage(conversationID int, messageID int) error {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations/%d/messages/%d", c.BaseURL, c.AccountID, conversationID, messageID)
+	req, err := http.NewRequest("DELETE", endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	// Corrigido: APIToken e HTTPClient com letras maiúsculas
+	req.Header.Set("api_access_token", c.APIToken)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete message: status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+func (c *Client) CreateMessage(conversationID int, content string, messageType string, attachments []string, sourceID string) (int, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations/%d/messages", c.BaseURL, c.AccountID, conversationID)
 
 	if len(attachments) > 0 {
-		return c.createMessageWithAttachments(endpoint, content, messageType, attachments)
+		return c.createMessageWithAttachments(endpoint, content, messageType, attachments, sourceID)
 	}
 
-	payload := CreateMessageRequest{
-		Content:     content,
-		MessageType: messageType,
-		Private:     false,
+	// Usamos um map para evitar erros com structs restritas e injetar o source_id
+	payload := map[string]interface{}{
+		"content":      content,
+		"message_type": messageType,
+		"private":      false,
+	}
+
+	if sourceID != "" {
+		payload["source_id"] = sourceID
 	}
 
 	jsonPayload, err := json.Marshal(payload)
@@ -570,7 +596,41 @@ func (c *Client) CreateMessage(conversationID int, content string, messageType s
 	return 0, nil
 }
 
-func (c *Client) createMessageWithAttachments(endpoint, content, messageType string, attachments []string) (int, error) {
+type ChatwootMessage struct {
+	ID       int    `json:"id"`
+	Content  string `json:"content"`
+	SourceID string `json:"source_id"`
+}
+
+func (c *Client) GetConversationMessages(conversationID int) ([]ChatwootMessage, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations/%d/messages", c.BaseURL, c.AccountID, conversationID)
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("api_access_token", c.APIToken)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get messages: status %d body %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Payload []ChatwootMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Payload, nil
+}
+
+func (c *Client) createMessageWithAttachments(endpoint, content, messageType string, attachments []string, sourceID string) (int, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -578,6 +638,9 @@ func (c *Client) createMessageWithAttachments(endpoint, content, messageType str
 	_ = writer.WriteField("message_type", messageType)
 	_ = writer.WriteField("private", "false")
 
+	if sourceID != "" {
+		_ = writer.WriteField("source_id", sourceID)
+	}
 	recordedAudioFilenames := make([]string, 0, len(attachments))
 	recordedAudioSeen := make(map[string]struct{}, len(attachments))
 

@@ -221,7 +221,7 @@ func (s *SyncService) syncChat(
 			continue
 		}
 
-		chatwootMsgID, err := s.syncMessageReturnID(ctx, conversation.ID, msg, waClient, opts, isGroup)
+		chatwootMsgID, err := s.syncMessageReturnID(ctx, conversation.ID, msg, waClient, opts, isGroup, key)
 		if err != nil {
 			progress.IncrementFailedMessages()
 			continue
@@ -257,6 +257,7 @@ func (s *SyncService) syncMessageReturnID(
 	waClient *whatsmeow.Client,
 	opts SyncOptions,
 	isGroup bool,
+	sourceID string,
 ) (int, error) {
 	messageType := "incoming"
 	if msg.IsFromMe {
@@ -286,7 +287,7 @@ func (s *SyncService) syncMessageReturnID(
 		}
 	}
 
-	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments)
+	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments, sourceID)
 
 	for _, fp := range attachments {
 		_ = os.Remove(fp)
@@ -400,6 +401,104 @@ func GetSyncService(
 // GetDefaultSyncService returns the global sync service if initialized
 func GetDefaultSyncService() *SyncService {
 	return globalSyncService
+}
+func (s *SyncService) Reconcile(ctx context.Context, deviceID, chatID string, since time.Time, waClient *whatsmeow.Client) error {
+	isGroup := strings.HasSuffix(chatID, "@g.us")
+	contactName := utils.ExtractPhoneFromJID(chatID)
+
+	// 1. Acha o contato e a conversa corretamente
+	contact, err := s.client.FindOrCreateContact(contactName, chatID, isGroup)
+	if err != nil {
+		return err
+	}
+
+	conversation, err := s.client.FindOrCreateConversation(contact.ID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Pega mensagens do BD (Gowa) formatando o filtro do jeito certo
+	waMsgs, err := s.chatStorageRepo.GetMessages(&domainChatStorage.MessageFilter{
+		DeviceID:  deviceID,
+		ChatJID:   chatID,
+		StartTime: &since,
+		Limit:     5000,
+	})
+	if err != nil {
+		return err
+	}
+
+	want := make(map[string]*domainChatStorage.Message, len(waMsgs))
+	for _, m := range waMsgs {
+		id := messageKey(deviceID, chatID, m)
+		want[id] = m
+	}
+
+	// 3. Pega mensagens do Chatwoot usando a função nova
+	cwMsgs, err := s.client.GetConversationMessages(conversation.ID)
+	if err != nil {
+		return err
+	}
+
+	existing := make(map[string]int)
+	for _, m := range cwMsgs {
+		if m.SourceID != "" {
+			existing[m.SourceID] = m.ID
+		}
+	}
+
+	// 4. Deleção do que sumiu no WhatsApp
+	for src, msgID := range existing {
+		if _, ok := want[src]; !ok {
+			_ = s.client.DeleteMessage(conversation.ID, msgID)
+			logrus.Infof("Chatwoot Sync: Deleted orphaned message %d", msgID)
+		}
+	}
+
+	// 5. Criação do que tá faltando no Chatwoot
+	for src, waMsg := range want {
+		if _, ok := existing[src]; ok {
+			continue // Já existe
+		}
+
+		messageType := "incoming"
+		if waMsg.IsFromMe {
+			messageType = "outgoing"
+		}
+
+		content := waMsg.Content
+		if content == "" && waMsg.MediaType != "" {
+			content = fmt.Sprintf("[%s]", waMsg.MediaType)
+		}
+
+		timePrefix := waMsg.Timestamp.Format("2006-01-02 15:04")
+		if isGroup && !waMsg.IsFromMe && waMsg.Sender != "" {
+			senderName := utils.ExtractPhoneFromJID(waMsg.Sender)
+			content = fmt.Sprintf("[%s] %s: %s", timePrefix, senderName, content)
+		} else {
+			content = fmt.Sprintf("[%s] %s", timePrefix, content)
+		}
+
+		var attachments []string
+		if waMsg.MediaType != "" && waMsg.URL != "" && len(waMsg.MediaKey) > 0 {
+			fp, err := s.downloadMedia(ctx, waMsg, waClient)
+			if err == nil && fp != "" {
+				attachments = append(attachments, fp)
+			}
+		}
+
+		// Cria a mensagem enviando o sourceID
+		_, err := s.client.CreateMessage(conversation.ID, content, messageType, attachments, src)
+		if err != nil {
+			logrus.Errorf("Chatwoot Sync: Failed to create missing message: %v", err)
+		}
+
+		for _, fp := range attachments {
+			_ = os.Remove(fp)
+		}
+	}
+
+	return nil
 }
 
 // SyncContactAvatar synchronizes the contact's avatar from WhatsApp to Chatwoot
