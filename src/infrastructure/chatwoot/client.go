@@ -543,7 +543,7 @@ func (c *Client) DeleteMessage(conversationID int, messageID int) error {
 
 	return nil
 }
-func (c *Client) CreateMessage(conversationID int, content string, messageType string, attachments []string, sourceID string) (int, error) {
+func (c *Client) CreateMessage(conversationID int, content string, messageType string, attachments []string, sourceID string, contentType string) (int, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations/%d/messages", c.BaseURL, c.AccountID, conversationID)
 
 	if len(attachments) > 0 {
@@ -559,6 +559,10 @@ func (c *Client) CreateMessage(conversationID int, content string, messageType s
 
 	if sourceID != "" {
 		payload["source_id"] = sourceID
+	}
+
+	if contentType != "" {
+		payload["content_type"] = contentType
 	}
 
 	jsonPayload, err := json.Marshal(payload)
@@ -600,6 +604,41 @@ type ChatwootMessage struct {
 	ID       int    `json:"id"`
 	Content  string `json:"content"`
 	SourceID string `json:"source_id"`
+}
+
+// ToggleTypingStatus envia o estado de digitação para o Chatwoot ("on" ou "off")
+func (c *Client) ToggleTypingStatus(conversationID int, status string) error {
+	endpoint := fmt.Sprintf("%s/api/v1/accounts/%d/conversations/%d/toggle_typing_status", c.BaseURL, c.AccountID, conversationID)
+
+	payload := map[string]string{
+		"typing_status": status, // "on" ou "off"
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal typing payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("api_access_token", c.APIToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to toggle typing status: status %d body %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 func (c *Client) GetConversationMessages(conversationID int) ([]ChatwootMessage, error) {

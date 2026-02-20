@@ -286,8 +286,7 @@ func (s *SyncService) syncMessageReturnID(
 			content += " [media unavailable]"
 		}
 	}
-
-	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments, sourceID)
+	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments, sourceID, "")
 
 	for _, fp := range attachments {
 		_ = os.Remove(fp)
@@ -488,7 +487,7 @@ func (s *SyncService) Reconcile(ctx context.Context, deviceID, chatID string, si
 		}
 
 		// Cria a mensagem enviando o sourceID
-		_, err := s.client.CreateMessage(conversation.ID, content, messageType, attachments, src)
+		_, err := s.client.CreateMessage(conversation.ID, content, messageType, attachments, src, "")
 		if err != nil {
 			logrus.Errorf("Chatwoot Sync: Failed to create missing message: %v", err)
 		}

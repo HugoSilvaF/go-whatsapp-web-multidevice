@@ -42,6 +42,7 @@ type CreateMessageRequest struct {
 	Content     string `json:"content"`
 	MessageType string `json:"message_type"`
 	Private     bool   `json:"private"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type WebhookPayload struct {

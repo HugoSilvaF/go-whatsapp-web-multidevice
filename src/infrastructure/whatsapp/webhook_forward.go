@@ -13,6 +13,7 @@ import (
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 var submitWebhookFn = submitWebhook
@@ -212,6 +213,42 @@ func buildChatwootMessageContent(data map[string]interface{}, isGroup bool, from
 
 	return content, attachments, true
 }
+func forwardTypingToChatwoot(evt *events.ChatPresence) {
+	cw := chatwoot.GetDefaultClient()
+	if !cw.IsConfigured() {
+		return
+	}
+
+	// O ChatPresence embute o MessageSource, então podemos acessar IsGroup e Chat direto
+	isGroup := evt.IsGroup
+	identifier := utils.ExtractPhoneFromJID(evt.Chat.String())
+	if isGroup {
+		identifier = evt.Chat.String()
+	}
+
+	// Busca o contato sem criá-lo (se não existir, ignoramos o typing)
+	contact, err := cw.FindContactByIdentifier(identifier, isGroup)
+	if err != nil || contact == nil {
+		return
+	}
+
+	// Busca a conversa
+	conv, err := cw.FindConversation(contact.ID)
+	if err != nil || conv == nil {
+		return
+	}
+
+	// Define se está digitando ("on") ou parou ("off") usando o enum correto do whatsmeow
+	status := "off"
+	if evt.State == types.ChatPresenceComposing || string(evt.State) == "audio" {
+		status = "on"
+	}
+
+	err = cw.ToggleTypingStatus(conv.ID, status)
+	if err != nil {
+		logrus.Warnf("Chatwoot: Falha ao enviar status de digitando: %v", err)
+	}
+}
 
 func extractBaseContent(data map[string]interface{}) string {
 	if body, ok := data["body"].(string); ok && body != "" {
@@ -274,7 +311,6 @@ var skipMessageTypes = map[string]struct{}{
 	"protocol":                {},
 	"chat_state":              {},
 	"sender_key_distribution": {},
-	"revoked":                 {},
 	"keep_in_chat":            {},
 }
 
@@ -404,7 +440,7 @@ func syncMessageToChatwoot(cw *chatwoot.Client, info *chatwootContactInfo, conte
 		messageType = "outgoing"
 	}
 
-	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, attachments, info.Identifier)
+	msgID, err := cw.CreateMessage(conversation.ID, content, messageType, attachments, info.Identifier, "")
 	if err != nil {
 		return fmt.Errorf("failed to create message: %w", err)
 	}
@@ -425,6 +461,11 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 	data, ok := payload["payload"].(map[string]interface{})
 	if !ok {
 		logrus.Error("Chatwoot: Invalid payload format (missing 'payload' object)")
+		return
+	}
+
+	if typeVal, ok := data["type"].(string); ok && typeVal == "revoked" {
+		go handleChatwootRevoke(ctx, cw, data)
 		return
 	}
 
@@ -454,6 +495,53 @@ func forwardToChatwoot(ctx context.Context, payload map[string]any) {
 
 	if err := syncMessageToChatwoot(cw, info, content, attachments); err != nil {
 		logrus.Errorf("Chatwoot: %v", err)
+	}
+}
+
+func handleChatwootRevoke(ctx context.Context, cw *chatwoot.Client, data map[string]interface{}) {
+	info, err := extractChatwootContactInfo(ctx, data)
+	if err != nil {
+		return
+	}
+
+	// O Gowa normalmente coloca o ID da mensagem original revogada dentro de um contexto ou no próprio ID dependendo do parser.
+	// Vamos tentar extrair.
+	revokedID := ""
+	if id, ok := data["id"].(string); ok {
+		revokedID = id // Às vezes o Gowa sobrescreve o ID principal pelo original
+	}
+
+	if revokedID == "" {
+		logrus.Warn("Chatwoot: ID da mensagem revogada não encontrado")
+		return
+	}
+
+	// Achar Contato e Conversa
+	contact, err := cw.FindContactByIdentifier(info.Identifier, info.IsGroup)
+	if err != nil || contact == nil {
+		return
+	}
+
+	conv, err := cw.FindConversation(contact.ID)
+	if err != nil || conv == nil {
+		return
+	}
+
+	// Buscar as mensagens daquela conversa no Chatwoot para achar a que tem o SourceID igual ao ID revogado
+	cwMsgs, err := cw.GetConversationMessages(conv.ID)
+	if err != nil {
+		return
+	}
+
+	for _, cwMsg := range cwMsgs {
+		// Se o source_id bater com o ID da mensagem que foi apagada no WhatsApp
+		if strings.Contains(cwMsg.SourceID, revokedID) || cwMsg.SourceID == revokedID {
+			err = cw.DeleteMessage(conv.ID, cwMsg.ID)
+			if err == nil {
+				logrus.Infof("Chatwoot: Mensagem removida com sucesso (Apagada no WhatsApp)")
+			}
+			return
+		}
 	}
 }
 
