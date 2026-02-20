@@ -173,6 +173,13 @@ func initEnvConfig() {
 	if viper.IsSet("chatwoot_days_limit_import_messages") {
 		config.ChatwootDaysLimitImportMessages = viper.GetInt("chatwoot_days_limit_import_messages")
 	}
+
+	if viper.IsSet("chatwoot_sync_avatar") {
+		config.ChatWootSyncAvatar = viper.GetBool("chatwoot_sync_avatar")
+	}
+	if viper.IsSet("chatwoot_enable_typing_indicator") {
+		config.ChatWootEnableTypingIndicator = viper.GetBool("chatwoot_enable_typing_indicator")
+	}
 }
 
 func initFlags() {

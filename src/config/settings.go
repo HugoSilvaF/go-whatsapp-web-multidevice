@@ -56,6 +56,9 @@ var (
 	ChatwootInboxID   = 0
 	ChatwootDeviceID  = "" // Device ID for outbound messages (required for multi-device)
 
+	ChatWootSyncAvatar            = false // Sync WhatsApp profile picture to Chatwoot contacts
+	ChatWootEnableTypingIndicator = false // Enable typing indicators in Chatwoot based on WhatsApp activity
+
 	// Chatwoot History Sync settings
 	ChatwootImportMessages          = false // Enable message history import to Chatwoot
 	ChatwootDaysLimitImportMessages = 3     // Days of history to import (default: 3)
