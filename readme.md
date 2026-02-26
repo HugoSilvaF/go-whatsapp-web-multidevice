@@ -92,6 +92,10 @@ Download:
 - Scoped API keys with rotation
   - `POST /auth/keys`, `GET /auth/keys`, `DELETE /auth/keys/:id`, `POST /auth/keys/:id/rotate`
   - See [API Keys Guide](./docs/api-keys.md)
+- Web UI for API key security operations
+  - Create/list/rotate/revoke scoped keys directly from dashboard
+  - Apply `X-API-Key` in UI client requests for scope validation tests
+  - Built-in hardening panel with production `.env` snippet generator
 - Subpath deployment support
   - `--base-path="/gowa"` (allows deployment under a specific path like `/gowa/sub/path`)
 - Configurable CORS origins
