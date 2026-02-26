@@ -47,7 +47,7 @@ func DeviceMiddleware(dm *whatsapp.DeviceManager) fiber.Handler {
 				return c.Status(fiber.StatusNotFound).JSON(utils.ResponseData{
 					Status:  fiber.StatusNotFound,
 					Code:    "DEVICE_NOT_FOUND",
-					Message: "device not found; create a device first from /api/devices or provide a valid X-Device-Id",
+					Message: "device not found; create a device first from /devices or provide a valid X-Device-Id",
 					Results: map[string]string{"device_id": resolvedID},
 				})
 			}

@@ -85,11 +85,24 @@ Download:
 - Compress video before send
 - Change OS name become your app (it's the device name when connect via mobile)
   - `--os=Chrome` or `--os=MyApplication`
-- Basic Auth (able to add multi credentials)
+- Auth for API (Basic + token)
   - `--basic-auth=kemal:secret,toni:password,userName:secretPassword`, or you can simplify
   - `-b=kemal:secret,toni:password,userName:secretPassword`
+  - `--auth-token=super-secret-token` (accepts `Authorization: Bearer <token>` or `X-API-Key`)
+- Scoped API keys with rotation
+  - `POST /auth/keys`, `GET /auth/keys`, `DELETE /auth/keys/:id`, `POST /auth/keys/:id/rotate`
+  - See [API Keys Guide](./docs/api-keys.md)
 - Subpath deployment support
   - `--base-path="/gowa"` (allows deployment under a specific path like `/gowa/sub/path`)
+- Configurable CORS origins
+  - `--cors-origins="https://app.example.com,http://localhost:5173"`
+  - empty value disables CORS middleware (same-origin only)
+- Security headers middleware (HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy)
+  - `--security-headers=true` (enabled by default)
+- Global request rate limiting by IP (except static/webhook/ws paths)
+  - `--rate-limit-enabled=true --rate-limit-max=120 --rate-limit-window-sec=60`
+- Public healthcheck endpoint for probes and load balancers
+  - `GET /healthz`
 - Customizable port and debug mode
   - `--port 8000`
   - `--debug true`
@@ -99,6 +112,10 @@ Download:
   - `--auto-mark-read=true` (automatically marks incoming messages as read)
 - Auto download media from incoming messages
   - `--auto-download-media=false` (disable automatic media downloads, default: `true`)
+- Auto download status/story media
+  - `--auto-download-status-media=false` (recommended for performance)
+- History sync raw payload dump
+  - `--history-sync-dump-enabled=false` (recommended for security/performance)
 - Auto reject incoming calls
   - `--auto-reject-call=true` or `WHATSAPP_AUTO_REJECT_CALL=true` (see [Webhook Payload](./docs/webhook-payload.md#call-events) for call events)
 - Configurable presence on connect
@@ -111,9 +128,8 @@ Download:
   - `-w="http://yourwebhook.site/handler"`
   - for more detail, see [Webhook Payload Documentation](./docs/webhook-payload.md)
 - Webhook Secret
-  Our webhook will be sent to you with an HMAC header and a sha256 default key `secret`.
-
-  You may modify this by using the option below:
+  Our webhook is sent with an HMAC SHA256 signature.
+  When `WHATSAPP_WEBHOOK` is configured, you must also set `WHATSAPP_WEBHOOK_SECRET`.
   - `--webhook-secret="secret"`
 - **Webhook Payload Documentation**
   For detailed webhook payload schemas, security implementation, and integration examples,
@@ -163,6 +179,28 @@ Download:
   **For production environments**, it's strongly recommended to use proper SSL certificates (e.g., Let's Encrypt)
   instead of disabling verification.
 
+## Quality Gates (Testing & Validation)
+
+From project root:
+
+```bash
+cd src
+go vet ./...
+go test -count=1 ./...
+```
+
+Race detector (recommended for concurrency-sensitive/auth packages):
+
+```bash
+cd src
+CGO_ENABLED=1 go test -race -count=1 ./infrastructure/apikey ./ui/rest/middleware
+```
+
+Notes:
+
+- `-race` requires CGO and a C compiler (`gcc`/`clang`) available in `PATH`.
+- In CI (`ubuntu-latest`), race tests run automatically in `.github/workflows/ci.yaml`.
+
 ## Configuration
 
 You can configure the application using either command-line flags (shown above) or environment variables. Configuration
@@ -196,14 +234,22 @@ To use environment variables:
 | `APP_DEBUG`                             | Enable debug logging                                          | `false`                                      | `APP_DEBUG=true`                              |
 | `APP_OS`                                | OS name (device name in WhatsApp)                             | `Chrome`                                     | `APP_OS=MyApp`                                |
 | `APP_BASIC_AUTH`                        | Basic authentication credentials                              | -                                            | `APP_BASIC_AUTH=user1:pass1,user2:pass2`      |
+| `APP_AUTH_TOKEN`                        | Shared token auth (`Bearer` or `X-API-Key`)                  | -                                            | `APP_AUTH_TOKEN=super-secret-token`           |
+| `APP_SECURITY_HEADERS`                  | Enable HTTP security headers middleware                       | `true`                                       | `APP_SECURITY_HEADERS=true`                   |
+| `APP_RATE_LIMIT_ENABLED`                | Enable global request rate limiting by IP                     | `false`                                      | `APP_RATE_LIMIT_ENABLED=true`                 |
+| `APP_RATE_LIMIT_MAX`                    | Max requests per rate-limit window                            | `120`                                        | `APP_RATE_LIMIT_MAX=120`                      |
+| `APP_RATE_LIMIT_WINDOW_SEC`             | Rate-limit window in seconds                                  | `60`                                         | `APP_RATE_LIMIT_WINDOW_SEC=60`                |
+| `APP_CORS_ORIGINS`                      | Allowed CORS origins (comma-separated, empty disables CORS)  | -                                            | `APP_CORS_ORIGINS=https://app.example.com`    |
 | `APP_BASE_PATH`                         | Base path for subpath deployment                              | -                                            | `APP_BASE_PATH=/gowa`                         |
 | `APP_TRUSTED_PROXIES`                   | Trusted proxy IP ranges for reverse proxy                     | -                                            | `APP_TRUSTED_PROXIES=0.0.0.0/0`               |
 | `DB_URI`                                | Database connection URI                                       | `file:storages/whatsapp.db?_foreign_keys=on` | `DB_URI=postgres://user:pass@host/db`         |
 | `WHATSAPP_AUTO_REPLY`                   | Auto-reply message                                            | -                                            | `WHATSAPP_AUTO_REPLY="Auto reply message"`    |
 | `WHATSAPP_AUTO_MARK_READ`               | Auto-mark incoming messages as read                           | `false`                                      | `WHATSAPP_AUTO_MARK_READ=true`                |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA`          | Auto-download media from incoming messages                    | `true`                                       | `WHATSAPP_AUTO_DOWNLOAD_MEDIA=false`          |
+| `WHATSAPP_AUTO_DOWNLOAD_STATUS_MEDIA`   | Auto-download status/story media from incoming events         | `false`                                      | `WHATSAPP_AUTO_DOWNLOAD_STATUS_MEDIA=false`   |
+| `WHATSAPP_HISTORY_SYNC_DUMP_ENABLED`    | Persist raw history sync payloads to disk                     | `false`                                      | `WHATSAPP_HISTORY_SYNC_DUMP_ENABLED=false`    |
 | `WHATSAPP_WEBHOOK`                      | Webhook URL(s) for events (comma-separated)                   | -                                            | `WHATSAPP_WEBHOOK=https://webhook.site/xxx`   |
-| `WHATSAPP_WEBHOOK_SECRET`               | Webhook secret for validation                                 | `secret`                                     | `WHATSAPP_WEBHOOK_SECRET=super-secret-key`    |
+| `WHATSAPP_WEBHOOK_SECRET`               | Webhook secret for HMAC validation (required if webhook set)  | -                                            | `WHATSAPP_WEBHOOK_SECRET=super-secret-key`    |
 | `WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY` | Skip TLS verification for webhooks (insecure)                 | `false`                                      | `WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY=true`  |
 | `WHATSAPP_WEBHOOK_EVENTS`               | Whitelist of events to forward (comma-separated, empty = all) | -                                            | `WHATSAPP_WEBHOOK_EVENTS=message,message.ack` |
 | `WHATSAPP_ACCOUNT_VALIDATION`           | Enable account validation                                     | `true`                                       | `WHATSAPP_ACCOUNT_VALIDATION=false`           |
@@ -211,16 +257,37 @@ To use environment variables:
 | `CHATWOOT_ENABLED`                      | Enable Chatwoot integration                                   | `false`                                      | `CHATWOOT_ENABLED=true`                       |
 | `CHATWOOT_URL`                          | Chatwoot instance URL                                         | -                                            | `CHATWOOT_URL=https://app.chatwoot.com`       |
 | `CHATWOOT_API_TOKEN`                    | Chatwoot API access token                                     | -                                            | `CHATWOOT_API_TOKEN=your-api-token`           |
+| `CHATWOOT_WEBHOOK_TOKEN`                | Optional token for `/chatwoot/webhook` (`X-Chatwoot-Token`)  | -                                            | `CHATWOOT_WEBHOOK_TOKEN=cw-secret`            |
 | `CHATWOOT_ACCOUNT_ID`                   | Chatwoot account ID                                           | -                                            | `CHATWOOT_ACCOUNT_ID=12345`                   |
 | `CHATWOOT_INBOX_ID`                     | Chatwoot inbox ID                                             | -                                            | `CHATWOOT_INBOX_ID=67890`                     |
 | `CHATWOOT_DEVICE_ID`                    | WhatsApp device ID for Chatwoot (multi-device setup)          | -                                            | `CHATWOOT_DEVICE_ID=628xxx@s.whatsapp.net`    |
 | `CHATWOOT_IMPORT_MESSAGES`              | Enable message history sync to Chatwoot                       | `false`                                      | `CHATWOOT_IMPORT_MESSAGES=true`               |
 | `CHATWOOT_DAYS_LIMIT_IMPORT_MESSAGES`   | Days of history to import                                     | `3`                                          | `CHATWOOT_DAYS_LIMIT_IMPORT_MESSAGES=7`       |
+| `CHATWOOT_SYNC_INCLUDE_MEDIA`           | Include media attachments in sync                             | `true`                                       | `CHATWOOT_SYNC_INCLUDE_MEDIA=true`            |
+| `CHATWOOT_SYNC_INCLUDE_GROUPS`          | Include group chats in sync                                   | `true`                                       | `CHATWOOT_SYNC_INCLUDE_GROUPS=true`           |
+| `CHATWOOT_SYNC_INCLUDE_STATUS`          | Include status/story chat in history sync                     | `false`                                      | `CHATWOOT_SYNC_INCLUDE_STATUS=false`          |
+| `CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT`   | Maximum messages per chat in history sync                     | `500`                                        | `CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT=300`     |
+| `CHATWOOT_SYNC_BATCH_SIZE`              | Sync batch size before delay                                  | `10`                                         | `CHATWOOT_SYNC_BATCH_SIZE=10`                 |
+| `CHATWOOT_SYNC_DELAY_MS`                | Delay between sync batches (milliseconds)                     | `500`                                        | `CHATWOOT_SYNC_DELAY_MS=750`                  |
+| `CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE`     | Max media size (bytes) to download during sync (`0` no limit)| `20000000`                                   | `CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE=10000000`  |
 
 **Documentation:**
 
 - For detailed webhook payload schemas, security implementation, and integration examples, see [Webhook Payload Documentation](./docs/webhook-payload.md)
 - For comprehensive Chatwoot integration guide, see [Chatwoot Integration Documentation](./docs/chatwoot.md)
+- For scoped API keys and scope model, see [API Keys Guide](./docs/api-keys.md)
+- For security/performance operational hardening, see [Security & Performance Hardening](./docs/security-performance-hardening.md)
+- For a full technical record of what changed, why, and migration impact, see [Implementation Change Log And Migration Guide](./docs/implementation-change-log.md)
+- For upcoming technical initiatives, see [Feature Roadmap](./docs/feature-roadmap.md)
+
+**Technical Docs Index:**
+
+- API contract and schemas: [OpenAPI Spec](./docs/openapi.yaml)
+- Route-by-route parameters/responses/errors: [Route Reference](./docs/routes.md)
+- Chatwoot integration + sync tuning: [Chatwoot Integration](./docs/chatwoot.md)
+- AuthZ/AuthN with scopes and rotation: [API Keys Guide](./docs/api-keys.md)
+- Production hardening checklist: [Security & Performance Hardening](./docs/security-performance-hardening.md)
+- Change history + rationale + breaking changes + migration: [Implementation Change Log And Migration Guide](./docs/implementation-change-log.md)
 
 Note: Command-line flags will override any values set in environment variables or `.env` file.
 
@@ -501,6 +568,8 @@ You can fork or edit this source code !
 
 - [API Specification Document](https://bump.sh/aldinokemal/doc/go-whatsapp-web-multidevice).
 - Check [docs/openapi.yml](./docs/openapi.yaml) for detailed API specifications.
+- See [Route Reference](./docs/routes.md) for required parameters, response schema, and common errors by route.
+- See [Security & Performance Hardening](./docs/security-performance-hardening.md) for production tuning.
 - Use [SwaggerEditor](https://editor.swagger.io) to visualize the API.
 - Generate HTTP clients using [openapi-generator](https://openapi-generator.tech/#try).
 
@@ -508,6 +577,10 @@ You can fork or edit this source code !
 |----------|----------------------------------------|--------|-------------------------------------|
 | ✅       | List Devices                           | GET    | /devices                            |
 | ✅       | Add Device                             | POST   | /devices                            |
+| ✅       | List API Keys                          | GET    | /auth/keys                          |
+| ✅       | Create API Key                         | POST   | /auth/keys                          |
+| ✅       | Revoke API Key                         | DELETE | /auth/keys/:id                      |
+| ✅       | Rotate API Key                         | POST   | /auth/keys/:id/rotate               |
 | ✅       | Get Device Info                        | GET    | /devices/:device_id                 |
 | ✅       | Remove Device                          | DELETE | /devices/:device_id                 |
 | ✅       | Login Device (QR)                      | GET    | /devices/:device_id/login           |

@@ -347,7 +347,7 @@ func (service serviceSend) SendImage(ctx context.Context, request domainSend.Ima
 	go func() {
 		errDelete := utils.RemoveFile(0, deletedItems...)
 		if errDelete != nil {
-			fmt.Println("error when deleting picture: ", errDelete)
+			logrus.WithError(errDelete).Warn("failed to delete temporary image files")
 		}
 	}()
 	if err != nil {
@@ -443,6 +443,9 @@ func (service serviceSend) SendFile(ctx context.Context, request domainSend.File
 func resolveDocumentMIME(filename string, fileBytes []byte) string {
 	extension := strings.ToLower(filepath.Ext(filename))
 	if extension != "" {
+		if extension == ".zip" {
+			return "application/zip"
+		}
 		if mimeType, ok := utils.KnownDocumentMIMEByExtension(extension); ok {
 			return mimeType
 		}

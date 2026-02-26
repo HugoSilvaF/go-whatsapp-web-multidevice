@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot"
@@ -14,7 +16,6 @@ import (
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/websocket"
 	"github.com/dustin/go-humanize"
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/basicauth"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -68,14 +69,26 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Use(middleware.Recovery())
 	app.Use(middleware.RequestTimeout(middleware.DefaultRequestTimeout))
+	if config.AppSecurityHeaders {
+		app.Use(middleware.SecurityHeaders())
+	}
+	if config.AppRateLimitEnabled {
+		app.Use(middleware.RequestRateLimit(config.AppRateLimitMax, config.AppRateLimitWindowSec, config.AppBasePath))
+	}
 	app.Use(middleware.BasicAuth())
 	if config.AppDebug {
 		app.Use(logger.New())
 	}
-	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
-	}))
+	if len(config.AppCorsOrigins) > 0 {
+		allowOrigins := strings.Join(config.AppCorsOrigins, ",")
+		if allowOrigins == "*" && (len(config.AppBasicAuthCredential) > 0 || config.AppAuthToken != "") {
+			logrus.Warn("CORS is configured with '*' while authentication is enabled; restrict APP_CORS_ORIGINS in production")
+		}
+		app.Use(cors.New(cors.Config{
+			AllowOrigins: allowOrigins,
+			AllowHeaders: "Origin, Content-Type, Accept, Authorization, X-Device-Id, X-API-Key, X-Chatwoot-Token",
+		}))
+	}
 
 	// Device manager - needed for chatwoot webhook
 	dm := whatsapp.GetDeviceManager()
@@ -96,19 +109,45 @@ func restServer(_ *cobra.Command, _ []string) {
 	}
 
 	if len(config.AppBasicAuthCredential) > 0 {
-		account := make(map[string]string)
-		for _, basicAuth := range config.AppBasicAuthCredential {
-			ba := strings.Split(basicAuth, ":")
-			if len(ba) != 2 {
-				logrus.Fatalln("Basic auth is not valid, please this following format <user>:<secret>")
-			}
-			account[ba[0]] = ba[1]
-		}
-
-		app.Use(basicauth.New(basicauth.Config{
-			Users: account,
-		}))
+		logrus.Infof("Basic authentication enabled with %d credential(s)", len(config.AppBasicAuthCredential))
 	}
+	if config.AppAuthToken != "" {
+		logrus.Info("Token authentication enabled (Authorization: Bearer <token> or X-API-Key)")
+	}
+
+	// Public health endpoint for load balancers/orchestrators.
+	app.Get("/healthz", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"status":      "ok",
+			"service":     "go-whatsapp-web-multidevice",
+			"version":     config.AppVersion,
+			"server_time": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+
+	var keyValidator middleware.APIKeyValidator
+	if apiKeyService != nil {
+		keyValidator = func(ctx context.Context, rawKey string) (*middleware.APIKeyValidationResult, error) {
+			res, err := apiKeyService.Authenticate(ctx, rawKey)
+			if err != nil {
+				return nil, err
+			}
+			return &middleware.APIKeyValidationResult{
+				KeyID:  res.KeyID,
+				Scopes: res.Scopes,
+			}, nil
+		}
+	}
+
+	account := make(map[string]string)
+	for _, basicAuth := range config.AppBasicAuthCredential {
+		ba := strings.SplitN(basicAuth, ":", 2)
+		if len(ba) != 2 {
+			logrus.Fatalln("Basic auth is not valid, please this following format <user>:<secret>")
+		}
+		account[ba[0]] = ba[1]
+	}
+	app.Use(middleware.RequireAuth(account, config.AppAuthToken, keyValidator))
 
 	// Create base path group or use app directly
 	var apiGroup fiber.Router = app
@@ -117,18 +156,23 @@ func restServer(_ *cobra.Command, _ []string) {
 	}
 
 	registerDeviceScopedRoutes := func(r fiber.Router) {
-		rest.InitRestApp(r, appUsecase)
-		rest.InitRestChat(r, chatUsecase)
-		rest.InitRestSend(r, sendUsecase)
-		rest.InitRestUser(r, userUsecase)
-		rest.InitRestMessage(r, messageUsecase)
-		rest.InitRestGroup(r, groupUsecase)
-		rest.InitRestNewsletter(r, newsletterUsecase)
-		websocket.RegisterRoutes(r, appUsecase)
+		rest.InitRestApp(r.Group("", middleware.RequireScope("devices:manage")), appUsecase)
+		rest.InitRestChat(r.Group("", middleware.RequireScope("chats:read", "messages:manage")), chatUsecase)
+		rest.InitRestSend(r.Group("", middleware.RequireScope("messages:send")), sendUsecase)
+		rest.InitRestUser(r.Group("", middleware.RequireScope("users:read")), userUsecase)
+		rest.InitRestMessage(r.Group("", middleware.RequireScope("messages:manage")), messageUsecase)
+		rest.InitRestGroup(r.Group("", middleware.RequireScope("groups:manage")), groupUsecase)
+		rest.InitRestNewsletter(r.Group("", middleware.RequireScope("newsletters:manage")), newsletterUsecase)
+		websocket.RegisterRoutes(r.Group("", middleware.RequireScope("chats:read")), appUsecase)
 	}
 
 	// Device management routes (no device_id required)
-	rest.InitRestDevice(apiGroup, deviceUsecase)
+	rest.InitRestDevice(apiGroup.Group("", middleware.RequireScope("devices:manage")), deviceUsecase)
+
+	// API key management routes
+	if apiKeyService != nil {
+		rest.InitRestAuth(apiGroup.Group("", middleware.RequireScope("auth:manage")), apiKeyService)
+	}
 
 	// Device-scoped operations (header-based)
 	headerDeviceGroup := apiGroup.Group("", middleware.DeviceMiddleware(dm))
@@ -137,8 +181,9 @@ func restServer(_ *cobra.Command, _ []string) {
 	// Chatwoot sync routes - require authentication (webhook is registered earlier without auth)
 	if config.ChatwootEnabled {
 		chatwootHandler := rest.NewChatwootHandler(appUsecase, sendUsecase, dm, chatStorageRepo)
-		apiGroup.Post("/chatwoot/sync", chatwootHandler.SyncHistory)
-		apiGroup.Get("/chatwoot/sync/status", chatwootHandler.SyncStatus)
+		chatwootSyncGroup := apiGroup.Group("", middleware.RequireScope("chatwoot:sync"))
+		chatwootSyncGroup.Post("/chatwoot/sync", chatwootHandler.SyncHistory)
+		chatwootSyncGroup.Get("/chatwoot/sync/status", chatwootHandler.SyncStatus)
 	}
 
 	apiGroup.Get("/", func(c *fiber.Ctx) error {

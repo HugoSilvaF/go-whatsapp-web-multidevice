@@ -82,7 +82,7 @@ All webhook requests include an HMAC SHA256 signature for security verification:
 - **Header**: `X-Hub-Signature-256`
 - **Format**: `sha256={signature}`
 - **Algorithm**: HMAC SHA256
-- **Default Secret**: `secret` (configurable via `--webhook-secret` or `WHATSAPP_WEBHOOK_SECRET`)
+- **Webhook Secret**: Required when webhook forwarding is enabled (set via `--webhook-secret` or `WHATSAPP_WEBHOOK_SECRET`)
 
 ### Verification Example (Node.js)
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
@@ -16,17 +17,33 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func submitWebhook(ctx context.Context, payload map[string]any, url string) error {
-	// Configure HTTP client with optional TLS skip verification
+var (
+	webhookClients sync.Map // map[bool]*http.Client
+)
+
+func getWebhookHTTPClient(insecureSkipVerify bool) *http.Client {
+	if client, ok := webhookClients.Load(insecureSkipVerify); ok {
+		return client.(*http.Client)
+	}
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: config.WhatsappWebhookInsecureSkipVerify,
+			InsecureSkipVerify: insecureSkipVerify,
 		},
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
 	}
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
 	}
+	webhookClients.Store(insecureSkipVerify, client)
+	return client
+}
+
+func submitWebhook(ctx context.Context, payload map[string]any, url string) error {
+	client := getWebhookHTTPClient(config.WhatsappWebhookInsecureSkipVerify)
 
 	postBody, err := json.Marshal(payload)
 	if err != nil {
@@ -47,16 +64,18 @@ func submitWebhook(ctx context.Context, payload map[string]any, url string) erro
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Hub-Signature-256", fmt.Sprintf("sha256=%s", signature))
 
-	var attempt int
-	var maxAttempts = 5
-	var sleepDuration = 1 * time.Second
+	var (
+		attempt       int
+		maxAttempts   = 5
+		sleepDuration = 1 * time.Second
+	)
 
 	for attempt = 0; attempt < maxAttempts; attempt++ {
 		// Create new request body for each attempt
 		req.Body = io.NopCloser(bytes.NewBuffer(postBody))
 		resp, err := client.Do(req)
 		if err == nil {
-			defer resp.Body.Close()
+			resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				logrus.Infof("Successfully submitted webhook on attempt %d", attempt+1)
 				return nil
@@ -65,7 +84,11 @@ func submitWebhook(ctx context.Context, payload map[string]any, url string) erro
 		}
 		logrus.Warnf("Attempt %d to submit webhook failed: %v", attempt+1, err)
 		if attempt < maxAttempts-1 {
-			time.Sleep(sleepDuration)
+			select {
+			case <-ctx.Done():
+				return pkgError.WebhookError(fmt.Sprintf("webhook submission canceled: %v", ctx.Err()))
+			case <-time.After(sleepDuration):
+			}
 			sleepDuration *= 2
 		}
 	}

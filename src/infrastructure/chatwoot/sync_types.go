@@ -40,17 +40,20 @@ type SyncOptions struct {
 	DaysLimit           int           // Days of history to import
 	IncludeMedia        bool          // Download and sync media attachments
 	IncludeGroups       bool          // Include group chats
+	IncludeStatus       bool          // Include status/story chat
 	MaxMessagesPerChat  int           // Limit messages per chat to prevent huge syncs
 	BatchSize           int           // Messages per batch (for rate limiting)
 	DelayBetweenBatches time.Duration // Delay between batches
+	MaxMediaFileSize    int64         // Maximum media size to download in bytes (0 = unlimited)
 }
 
 // SyncRequest is the API request for triggering a sync
 type SyncRequest struct {
-	DeviceID     string `json:"device_id,omitempty"`
-	DaysLimit    int    `json:"days_limit,omitempty"`
-	IncludeMedia bool   `json:"include_media"`
-	IncludeGroups bool  `json:"include_groups"`
+	DeviceID      string `json:"device_id,omitempty"`
+	DaysLimit     int    `json:"days_limit,omitempty"`
+	IncludeMedia  bool   `json:"include_media"`
+	IncludeGroups bool   `json:"include_groups"`
+	IncludeStatus bool   `json:"include_status"`
 }
 
 // SyncResponse is the API response for sync operations
@@ -66,9 +69,11 @@ func DefaultSyncOptions() SyncOptions {
 		DaysLimit:           3,
 		IncludeMedia:        true,
 		IncludeGroups:       true,
+		IncludeStatus:       false,
 		MaxMessagesPerChat:  500,
 		BatchSize:           10,
 		DelayBetweenBatches: 500 * time.Millisecond,
+		MaxMediaFileSize:    20_000_000,
 	}
 }
 

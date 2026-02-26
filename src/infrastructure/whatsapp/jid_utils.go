@@ -2,10 +2,16 @@ package whatsapp
 
 import (
 	"context"
+	"strings"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
+
+func IsStatusBroadcastJID(jid string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(jid))
+	return normalized == "status@broadcast" || strings.HasPrefix(normalized, "status@")
+}
 
 // NormalizeJIDFromLID converts @lid JIDs to their corresponding @s.whatsapp.net JIDs
 // Returns the original JID if it's not an @lid or if LID lookup fails

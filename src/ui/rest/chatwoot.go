@@ -16,6 +16,7 @@ import (
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/middleware"
 	"github.com/gofiber/fiber/v2"
 	"github.com/sirupsen/logrus"
 )
@@ -92,6 +93,26 @@ func sanitizeText(s string) string {
 }
 
 func (h *ChatwootHandler) HandleWebhook(c *fiber.Ctx) error {
+	if config.ChatwootWebhookToken != "" {
+		token := strings.TrimSpace(c.Get("X-Chatwoot-Token"))
+		if token == "" {
+			token = strings.TrimSpace(c.Query("token"))
+		}
+		if token == "" {
+			authHeader := strings.TrimSpace(c.Get("Authorization"))
+			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				token = strings.TrimSpace(authHeader[len("Bearer "):])
+			}
+		}
+		if !middleware.IsSecureTokenMatch(token, config.ChatwootWebhookToken) {
+			return c.Status(fiber.StatusUnauthorized).JSON(utils.ResponseData{
+				Status:  fiber.StatusUnauthorized,
+				Code:    "UNAUTHORIZED_WEBHOOK",
+				Message: "invalid or missing chatwoot webhook token",
+			})
+		}
+	}
+
 	logrus.Debugf("Chatwoot Webhook raw body: %s", string(c.Body()))
 
 	instance, resolvedID, err := h.DeviceManager.ResolveDevice(config.ChatwootDeviceID)
@@ -344,8 +365,9 @@ func (h *ChatwootHandler) SyncHistory(c *fiber.Ctx) error {
 		// Try query parameters as fallback
 		req.DeviceID = c.Query("device_id", config.ChatwootDeviceID)
 		req.DaysLimit = c.QueryInt("days", config.ChatwootDaysLimitImportMessages)
-		req.IncludeMedia = c.QueryBool("media", true)
-		req.IncludeGroups = c.QueryBool("groups", true)
+		req.IncludeMedia = c.QueryBool("media", config.ChatwootSyncIncludeMedia)
+		req.IncludeGroups = c.QueryBool("groups", config.ChatwootSyncIncludeGroups)
+		req.IncludeStatus = c.QueryBool("status", config.ChatwootSyncIncludeStatus)
 	}
 
 	// Default values
@@ -405,6 +427,11 @@ func (h *ChatwootHandler) SyncHistory(c *fiber.Ctx) error {
 	opts.DaysLimit = req.DaysLimit
 	opts.IncludeMedia = req.IncludeMedia
 	opts.IncludeGroups = req.IncludeGroups
+	opts.IncludeStatus = req.IncludeStatus
+	opts.MaxMessagesPerChat = config.ChatwootSyncMaxMessagesPerChat
+	opts.BatchSize = config.ChatwootSyncBatchSize
+	opts.DelayBetweenBatches = time.Duration(config.ChatwootSyncDelayMs) * time.Millisecond
+	opts.MaxMediaFileSize = config.ChatwootSyncMaxMediaFileSize
 
 	// Start async sync
 	go func() {
@@ -423,10 +450,15 @@ func (h *ChatwootHandler) SyncHistory(c *fiber.Ctx) error {
 		Code:    "SYNC_STARTED",
 		Message: "History sync initiated in background",
 		Results: map[string]interface{}{
-			"device_id":      resolvedID,
-			"days_limit":     opts.DaysLimit,
-			"include_media":  opts.IncludeMedia,
-			"include_groups": opts.IncludeGroups,
+			"device_id":                resolvedID,
+			"days_limit":               opts.DaysLimit,
+			"include_media":            opts.IncludeMedia,
+			"include_groups":           opts.IncludeGroups,
+			"include_status":           opts.IncludeStatus,
+			"max_messages_per_chat":    opts.MaxMessagesPerChat,
+			"batch_size":               opts.BatchSize,
+			"delay_between_batches_ms": int(opts.DelayBetweenBatches / time.Millisecond),
+			"max_media_file_size":      opts.MaxMediaFileSize,
 		},
 	})
 }

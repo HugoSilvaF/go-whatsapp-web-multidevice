@@ -1,7 +1,7 @@
 openapi: "3.0.0"
 info:
   title: WhatsApp API MultiDevice
-  version: 8.2.0
+  version: 8.3.0
   description: |
     This API is used for sending whatsapp via API.
 
@@ -31,8 +31,38 @@ tags:
     description: Chatwoot integration for customer support
 security:
   - basicAuth: []
+  - bearerAuth: []
+  - apiKeyAuth: []
 
 paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags:
+        - app
+      summary: Health check
+      description: Public endpoint for readiness/liveness monitoring.
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: go-whatsapp-web-multidevice
+                  version:
+                    type: string
+                    example: v8.3.0
+                  server_time:
+                    type: string
+                    format: date-time
   /app/login:
     get:
       operationId: appLogin
@@ -3100,6 +3130,10 @@ paths:
                   type: boolean
                   default: true
                   description: Include group chats in sync
+                include_status:
+                  type: boolean
+                  default: false
+                  description: Include status/story chat in sync (can be heavy)
       responses:
         '200':
           description: Sync initiated successfully
@@ -3171,6 +3205,12 @@ paths:
       description: |
         Receives webhook events from Chatwoot and sends messages to WhatsApp.
         Configure this URL in your Chatwoot inbox webhook settings.
+        If `CHATWOOT_WEBHOOK_TOKEN` is configured, send it via `X-Chatwoot-Token`
+        header or `token` query parameter.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ChatwootWebhookTokenHeader'
+        - $ref: '#/components/parameters/ChatwootWebhookTokenQuery'
       requestBody:
         content:
           application/json:
@@ -3180,12 +3220,245 @@ paths:
       responses:
         '200':
           description: Webhook processed
+        '401':
+          description: Unauthorized webhook token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
         '503':
           description: Device not available
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBadRequest'
+
+  /auth/keys:
+    get:
+      operationId: listApiKeys
+      tags:
+        - app
+      summary: List API keys
+      description: |
+        Lists API key metadata. API key secrets are never returned.
+        For API-key-authenticated requests, the key must include `auth:manage` scope.
+      parameters:
+        - name: include_revoked
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Include revoked keys
+      responses:
+        '200':
+          description: API keys listed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    example: SUCCESS
+                  message:
+                    type: string
+                    example: API keys listed
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKeyMetadata'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '403':
+          description: Missing required scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+    post:
+      operationId: createApiKey
+      tags:
+        - app
+      summary: Create API key
+      description: |
+        Creates a new API key with scopes.
+        The generated key (`gowa.<id>.<secret>`) is returned only once.
+        For API-key-authenticated requests, the key must include `auth:manage` scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name:
+                  type: string
+                  example: bot-sender
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                  example: [messages:send, chats:read]
+                expires_in_days:
+                  type: integer
+                  example: 30
+      responses:
+        '200':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    example: SUCCESS
+                  message:
+                    type: string
+                    example: API key created
+                  results:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                      scopes:
+                        type: array
+                        items:
+                          type: string
+                      expires_at:
+                        type: string
+                        format: date-time
+                      api_key:
+                        type: string
+                        example: gowa.123e4567-e89b-12d3-a456-426614174000.aLongSecretValue
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '403':
+          description: Missing required scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+
+  /auth/keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      tags:
+        - app
+      summary: Revoke API key
+      description: |
+        Revokes a key so it can no longer authenticate requests.
+        For API-key-authenticated requests, the key must include `auth:manage` scope.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+        '404':
+          description: Key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorNotFound'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '403':
+          description: Missing required scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+
+  /auth/keys/{id}/rotate:
+    post:
+      operationId: rotateApiKey
+      tags:
+        - app
+      summary: Rotate API key
+      description: |
+        Rotates secret for an existing key while keeping metadata/scopes.
+        New key is returned once.
+        For API-key-authenticated requests, the key must include `auth:manage` scope.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    example: SUCCESS
+                  message:
+                    type: string
+                    example: API key rotated
+                  results:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                      scopes:
+                        type: array
+                        items:
+                          type: string
+                      api_key:
+                        type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '403':
+          description: Missing required scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
 
 components:
   parameters:
@@ -3200,12 +3473,65 @@ components:
       schema:
         type: string
         example: 'my-device-id'
+    ChatwootWebhookTokenHeader:
+      name: X-Chatwoot-Token
+      in: header
+      required: false
+      description: Optional webhook token for Chatwoot webhook endpoint.
+      schema:
+        type: string
+        example: cw-secret-token
+    ChatwootWebhookTokenQuery:
+      name: token
+      in: query
+      required: false
+      description: Optional webhook token alternative when custom headers are unavailable.
+      schema:
+        type: string
+        example: cw-secret-token
 
   securitySchemes:
     basicAuth:
       type: http
       scheme: basic
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
   schemas:
+    ApiKeyMetadata:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 123e4567-e89b-12d3-a456-426614174000
+        name:
+          type: string
+          example: bot-sender
+        scopes:
+          type: array
+          items:
+            type: string
+          example: [messages:send, chats:read]
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     CreateGroupResponse:
       type: object
       properties:
@@ -4464,6 +4790,22 @@ components:
             include_groups:
               type: boolean
               example: true
+            include_status:
+              type: boolean
+              example: false
+            max_messages_per_chat:
+              type: integer
+              example: 500
+            batch_size:
+              type: integer
+              example: 10
+            delay_between_batches_ms:
+              type: integer
+              example: 500
+            max_media_file_size:
+              type: integer
+              format: int64
+              example: 20000000
     ChatwootSyncStatusResponse:
       type: object
       properties:

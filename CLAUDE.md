@@ -16,6 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Run all tests**: `cd src && go test ./...`
 - **Run specific package tests**: `cd src && go test ./validations`
 - **Run tests with coverage**: `cd src && go test -cover ./...`
+- **Run race detector (security/performance)**:
+  - Linux/macOS (with GCC/Clang + CGO): `cd src && CGO_ENABLED=1 go test -race ./infrastructure/apikey ./ui/rest/middleware`
+  - Windows PowerShell (with GCC in PATH): `cd src; $env:CGO_ENABLED='1'; go test -race ./infrastructure/apikey ./ui/rest/middleware`
 
 ### Development
 

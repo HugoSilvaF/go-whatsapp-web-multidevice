@@ -72,6 +72,10 @@ func handleImageMessage(ctx context.Context, evt *events.Message, client *whatsm
 	if client == nil {
 		return
 	}
+	if !config.WhatsappAutoDownloadStatusMedia && IsStatusBroadcastJID(evt.Info.Chat.String()) {
+		log.Debugf("Skipping status/story media auto-download for chat %s", evt.Info.Chat.String())
+		return
+	}
 	if img := evt.Message.GetImageMessage(); img != nil {
 		if extracted, err := utils.ExtractMedia(ctx, client, config.PathStorages, img); err != nil {
 			log.Errorf("Failed to download image: %v", err)

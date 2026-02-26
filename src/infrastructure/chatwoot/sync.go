@@ -86,8 +86,26 @@ func messageKey(deviceID, chatJID string, msg *domainChatStorage.Message) string
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
+func isStatusBroadcastChatJID(chatJID string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(chatJID))
+	return normalized == "status@broadcast" || strings.HasPrefix(normalized, "status@")
+}
+
 // SyncHistory performs the initial message history sync to Chatwoot
 func (s *SyncService) SyncHistory(ctx context.Context, deviceID string, waClient *whatsmeow.Client, opts SyncOptions) (*SyncProgress, error) {
+	if opts.MaxMessagesPerChat <= 0 {
+		opts.MaxMessagesPerChat = DefaultSyncOptions().MaxMessagesPerChat
+	}
+	if opts.BatchSize <= 0 {
+		opts.BatchSize = DefaultSyncOptions().BatchSize
+	}
+	if opts.DelayBetweenBatches < 0 {
+		opts.DelayBetweenBatches = 0
+	}
+	if opts.MaxMediaFileSize < 0 {
+		opts.MaxMediaFileSize = 0
+	}
+
 	// Atomic check-and-set to prevent race condition
 	progress := NewSyncProgress(deviceID)
 	s.progressMu.Lock()
@@ -101,8 +119,8 @@ func (s *SyncService) SyncHistory(ctx context.Context, deviceID string, waClient
 
 	progress.SetRunning()
 
-	logrus.Infof("Chatwoot Sync: Starting history sync for device %s (days: %d, media: %v, groups: %v)",
-		deviceID, opts.DaysLimit, opts.IncludeMedia, opts.IncludeGroups)
+	logrus.Infof("Chatwoot Sync: Starting history sync for device %s (days: %d, media: %v, groups: %v, status: %v, max_media_bytes: %d)",
+		deviceID, opts.DaysLimit, opts.IncludeMedia, opts.IncludeGroups, opts.IncludeStatus, opts.MaxMediaFileSize)
 
 	// 1. Get all chats for this device
 	chats, err := s.chatStorageRepo.GetChats(&domainChatStorage.ChatFilter{
@@ -112,6 +130,21 @@ func (s *SyncService) SyncHistory(ctx context.Context, deviceID string, waClient
 		progress.SetFailed(err)
 		return progress, fmt.Errorf("failed to get chats: %w", err)
 	}
+
+	filteredChats := make([]*domainChatStorage.Chat, 0, len(chats))
+	for _, chat := range chats {
+		if chat == nil {
+			continue
+		}
+		if !opts.IncludeStatus && isStatusBroadcastChatJID(chat.JID) {
+			continue
+		}
+		if strings.HasSuffix(chat.JID, "@g.us") && !opts.IncludeGroups {
+			continue
+		}
+		filteredChats = append(filteredChats, chat)
+	}
+	chats = filteredChats
 
 	progress.SetTotals(len(chats), 0)
 	logrus.Infof("Chatwoot Sync: Found %d chats to sync", len(chats))
@@ -155,6 +188,9 @@ func (s *SyncService) syncChat(
 	opts SyncOptions,
 	progress *SyncProgress,
 ) error {
+	if isStatusBroadcastChatJID(chat.JID) && !opts.IncludeStatus {
+		return nil
+	}
 	isGroup := strings.HasSuffix(chat.JID, "@g.us")
 	if isGroup && !opts.IncludeGroups {
 		return nil
@@ -279,11 +315,15 @@ func (s *SyncService) syncMessageReturnID(
 
 	var attachments []string
 	if opts.IncludeMedia && msg.MediaType != "" && msg.URL != "" && len(msg.MediaKey) > 0 {
-		fp, err := s.downloadMedia(ctx, msg, waClient)
-		if err == nil && fp != "" {
-			attachments = append(attachments, fp)
+		if opts.MaxMediaFileSize > 0 && msg.FileLength > uint64(opts.MaxMediaFileSize) {
+			content += fmt.Sprintf(" [media skipped: file too large (%d bytes)]", msg.FileLength)
 		} else {
-			content += " [media unavailable]"
+			fp, err := s.downloadMedia(ctx, msg, waClient)
+			if err == nil && fp != "" {
+				attachments = append(attachments, fp)
+			} else {
+				content += " [media unavailable]"
+			}
 		}
 	}
 	chatwootMsgID, err := s.client.CreateMessage(conversationID, content, messageType, attachments, sourceID, "")
@@ -358,8 +398,11 @@ func (s *SyncService) downloadMedia(ctx context.Context, msg *domainChatStorage.
 		return "", fmt.Errorf("unsupported media type: %s", msg.MediaType)
 	}
 
+	downloadCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	// Download
-	data, err := waClient.Download(ctx, downloadable)
+	data, err := waClient.Download(downloadCtx, downloadable)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -596,6 +639,13 @@ func TriggerAutoSync(deviceID string, chatStorageRepo domainChatStorage.IChatSto
 	go func() {
 		opts := DefaultSyncOptions()
 		opts.DaysLimit = config.ChatwootDaysLimitImportMessages
+		opts.IncludeMedia = config.ChatwootSyncIncludeMedia
+		opts.IncludeGroups = config.ChatwootSyncIncludeGroups
+		opts.IncludeStatus = config.ChatwootSyncIncludeStatus
+		opts.MaxMessagesPerChat = config.ChatwootSyncMaxMessagesPerChat
+		opts.BatchSize = config.ChatwootSyncBatchSize
+		opts.DelayBetweenBatches = time.Duration(config.ChatwootSyncDelayMs) * time.Millisecond
+		opts.MaxMediaFileSize = config.ChatwootSyncMaxMediaFileSize
 
 		logrus.Infof("Chatwoot Sync: Auto-sync triggered for device %s", storageDeviceID)
 

@@ -86,14 +86,18 @@ func determineMediaExtension(originalFilename, mimeType string) string {
 		return ext
 	}
 
+	if normalizedMimeType == "audio/ogg" || normalizedMimeType == "audio/opus" || normalizedMimeType == "application/ogg" {
+		return ".ogg"
+	}
+
+	if normalizedMimeType == "application/zip" {
+		return ".zip"
+	}
+
 	if normalizedMimeType != "" {
 		if ext, err := mime.ExtensionsByType(normalizedMimeType); err == nil && len(ext) > 0 {
 			return ext[0]
 		}
-	}
-
-	if normalizedMimeType == "audio/ogg" || normalizedMimeType == "audio/opus" || normalizedMimeType == "application/ogg" {
-		return ".ogg"
 	}
 
 	if normalizedMimeType == "audio/mpeg" {

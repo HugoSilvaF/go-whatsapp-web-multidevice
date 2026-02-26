@@ -33,6 +33,13 @@ Before setting up the integration, ensure you have:
 | `CHATWOOT_DEVICE_ID` | No | - | Specific device ID for outbound messages (required for multi-device setups) |
 | `CHATWOOT_IMPORT_MESSAGES` | No | `false` | Enable message history sync to Chatwoot |
 | `CHATWOOT_DAYS_LIMIT_IMPORT_MESSAGES` | No | `3` | Number of days of history to import |
+| `CHATWOOT_SYNC_INCLUDE_MEDIA` | No | `true` | Include media attachments in sync |
+| `CHATWOOT_SYNC_INCLUDE_GROUPS` | No | `true` | Include group chats in sync |
+| `CHATWOOT_SYNC_INCLUDE_STATUS` | No | `false` | Include status/story chat in sync (not recommended) |
+| `CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT` | No | `500` | Maximum messages to sync per chat |
+| `CHATWOOT_SYNC_BATCH_SIZE` | No | `10` | Messages processed per batch |
+| `CHATWOOT_SYNC_DELAY_MS` | No | `500` | Delay between batches in milliseconds |
+| `CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE` | No | `20000000` | Max media file size (bytes) downloaded during sync |
 
 ### Configuration Examples
 
@@ -48,6 +55,13 @@ CHATWOOT_DEVICE_ID=my-whatsapp-device
 # Optional: History sync settings
 CHATWOOT_IMPORT_MESSAGES=true
 CHATWOOT_DAYS_LIMIT_IMPORT_MESSAGES=7
+CHATWOOT_SYNC_INCLUDE_MEDIA=true
+CHATWOOT_SYNC_INCLUDE_GROUPS=true
+CHATWOOT_SYNC_INCLUDE_STATUS=false
+CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT=300
+CHATWOOT_SYNC_BATCH_SIZE=10
+CHATWOOT_SYNC_DELAY_MS=750
+CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE=10000000
 ```
 
 **CLI Flags:**
@@ -166,7 +180,8 @@ curl -X POST "http://your-api:3000/chatwoot/sync" \
     "device_id": "my-device-id",
     "days_limit": 7,
     "include_media": true,
-    "include_groups": true
+    "include_groups": true,
+    "include_status": false
   }'
 ```
 
@@ -182,6 +197,37 @@ curl "http://your-api:3000/chatwoot/sync/status?device_id=my-device-id"
 | `days_limit` | 3 | Number of days of history to import |
 | `include_media` | true | Download and sync media attachments |
 | `include_groups` | true | Include group chat messages |
+| `include_status` | false | Include status/story chat (can be heavy) |
+
+### Performance Guardrails
+
+Use these controls to avoid overload in large accounts:
+
+- `CHATWOOT_SYNC_INCLUDE_STATUS=false`
+  - Keeps `status@broadcast` out of sync by default.
+- `CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT`
+  - Caps per-chat load; lower value = faster/safer sync.
+- `CHATWOOT_SYNC_BATCH_SIZE` + `CHATWOOT_SYNC_DELAY_MS`
+  - Controls pacing and CPU/network pressure.
+- `CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE`
+  - Skips oversized media downloads during sync.
+
+Recommended production baseline:
+
+```bash
+CHATWOOT_SYNC_INCLUDE_STATUS=false
+CHATWOOT_SYNC_MAX_MESSAGES_PER_CHAT=300
+CHATWOOT_SYNC_BATCH_SIZE=10
+CHATWOOT_SYNC_DELAY_MS=750
+CHATWOOT_SYNC_MAX_MEDIA_FILE_SIZE=10000000
+```
+
+### Security Notes For Sync
+
+- Keep `include_status=false` unless you explicitly need stories.
+- Large media imports increase sensitive data footprint in temp storage.
+- Prefer lower media-size limits in regulated environments.
+- Keep `WHATSAPP_HISTORY_SYNC_DUMP_ENABLED=false` unless actively debugging.
 
 ### How It Works
 
@@ -196,6 +242,7 @@ curl "http://your-api:3000/chatwoot/sync/status?device_id=my-device-id"
 - Messages are prefixed with their original timestamp for context: `[2024-01-15 14:30] Hello!`
 - Group messages include the sender name: `[2024-01-15 14:30] John: Hello!`
 - Media older than ~2 weeks may be unavailable on WhatsApp servers
+- By default, status/story chat (`status@broadcast`) is excluded from sync to avoid heavy media downloads
 - The sync runs in the background and can be monitored via the status endpoint
 - Only one sync can run per device at a time
 
@@ -393,8 +440,9 @@ Expected response: `200 OK` or error with details
 - Use HTTPS for all webhook communications
 - Consider network-level restrictions on the webhook endpoint
 - Monitor for unusual activity in Chatwoot logs
-- Use strong authentication for the WhatsApp API (`APP_BASIC_AUTH`)
-- **Note:** The `/chatwoot/webhook` endpoint is excluded from basic auth to allow Chatwoot to send webhooks without credentials. The `/chatwoot/sync` endpoints require authentication.
+- Use strong authentication for the WhatsApp API (`APP_BASIC_AUTH` and/or `APP_AUTH_TOKEN`)
+- Optionally protect the webhook endpoint with `CHATWOOT_WEBHOOK_TOKEN`
+- **Note:** The `/chatwoot/webhook` endpoint is excluded from global API auth middleware. The `/chatwoot/sync` endpoints require API authentication.
 
 ## API Reference
 
@@ -404,11 +452,13 @@ Expected response: `200 OK` or error with details
 
 **Headers:**
 - `Content-Type: application/json`
+- Optional: `X-Chatwoot-Token: <CHATWOOT_WEBHOOK_TOKEN>`
 
 **Request Body:** Standard Chatwoot webhook payload
 
 **Response Codes:**
 - `200 OK` - Message processed (or skipped)
+- `401 Unauthorized` - Invalid/missing webhook token (when enabled)
 - `503 Service Unavailable` - No device available
 
 ### Related Endpoints

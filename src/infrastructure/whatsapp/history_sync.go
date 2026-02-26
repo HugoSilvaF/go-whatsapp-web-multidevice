@@ -25,29 +25,33 @@ func handleHistorySync(ctx context.Context, evt *events.HistorySync, chatStorage
 		return
 	}
 	id := atomic.AddInt32(&historySyncID, 1)
-	fileName := fmt.Sprintf("%s/history-%d-%s-%d-%s.json",
-		config.PathStorages,
-		startupTime,
-		client.Store.ID.String(),
-		id,
-		evt.Data.SyncType.String(),
-	)
+	if config.WhatsappHistorySyncDumpEnabled {
+		fileName := fmt.Sprintf("%s/history-%d-%s-%d-%s.json",
+			config.PathStorages,
+			startupTime,
+			client.Store.ID.String(),
+			id,
+			evt.Data.SyncType.String(),
+		)
 
-	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE, 0600)
-	if err != nil {
-		log.Errorf("Failed to open file to write history sync: %v", err)
-		return
+		file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE, 0600)
+		if err != nil {
+			log.Errorf("Failed to open file to write history sync: %v", err)
+			return
+		}
+		defer file.Close()
+
+		enc := json.NewEncoder(file)
+		enc.SetIndent("", "  ")
+		if err = enc.Encode(evt.Data); err != nil {
+			log.Errorf("Failed to write history sync: %v", err)
+			return
+		}
+
+		log.Infof("Wrote history sync to %s", fileName)
+	} else {
+		log.Debugf("History sync dump disabled, processing event %d in-memory", id)
 	}
-	defer file.Close()
-
-	enc := json.NewEncoder(file)
-	enc.SetIndent("", "  ")
-	if err = enc.Encode(evt.Data); err != nil {
-		log.Errorf("Failed to write history sync: %v", err)
-		return
-	}
-
-	log.Infof("Wrote history sync to %s", fileName)
 
 	// Process history sync data to database
 	if chatStorageRepo != nil {

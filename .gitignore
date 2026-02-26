@@ -5,6 +5,8 @@ tmp
 history-*.json
 main
 main.exe
+*.exe
+src/*.exe
 *.jpe
 src/pkged.go
 storages

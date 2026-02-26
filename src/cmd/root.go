@@ -21,6 +21,7 @@ import (
 	domainNewsletter "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/newsletter"
 	domainSend "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/send"
 	domainUser "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/user"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/apikey"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatstorage"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
@@ -43,6 +44,7 @@ var (
 	// Chat Storage
 	chatStorageDB   *sql.DB
 	chatStorageRepo domainChatStorage.IChatStorageRepository
+	apiKeyService   *apikey.Service
 
 	// Usecase
 	appUsecase        domainApp.IAppUsecase
@@ -79,7 +81,6 @@ func init() {
 
 // initEnvConfig loads configuration from environment variables
 func initEnvConfig() {
-	fmt.Println(viper.AllSettings())
 	// Application settings
 	if envPort := viper.GetString("app_port"); envPort != "" {
 		config.AppPort = envPort
@@ -96,6 +97,25 @@ func initEnvConfig() {
 	if envBasicAuth := viper.GetString("app_basic_auth"); envBasicAuth != "" {
 		credential := strings.Split(envBasicAuth, ",")
 		config.AppBasicAuthCredential = credential
+	}
+	if envAuthToken := viper.GetString("app_auth_token"); envAuthToken != "" {
+		config.AppAuthToken = envAuthToken
+	}
+	if viper.IsSet("app_security_headers") {
+		config.AppSecurityHeaders = viper.GetBool("app_security_headers")
+	}
+	if viper.IsSet("app_rate_limit_enabled") {
+		config.AppRateLimitEnabled = viper.GetBool("app_rate_limit_enabled")
+	}
+	if viper.IsSet("app_rate_limit_max") {
+		config.AppRateLimitMax = viper.GetInt("app_rate_limit_max")
+	}
+	if viper.IsSet("app_rate_limit_window_sec") {
+		config.AppRateLimitWindowSec = viper.GetInt("app_rate_limit_window_sec")
+	}
+	if envCorsOrigins := viper.GetString("app_cors_origins"); envCorsOrigins != "" {
+		origins := strings.Split(envCorsOrigins, ",")
+		config.AppCorsOrigins = origins
 	}
 	if envBasePath := viper.GetString("app_base_path"); envBasePath != "" {
 		config.AppBasePath = envBasePath
@@ -123,6 +143,12 @@ func initEnvConfig() {
 	if viper.IsSet("whatsapp_auto_download_media") {
 		config.WhatsappAutoDownloadMedia = viper.GetBool("whatsapp_auto_download_media")
 	}
+	if viper.IsSet("whatsapp_auto_download_status_media") {
+		config.WhatsappAutoDownloadStatusMedia = viper.GetBool("whatsapp_auto_download_status_media")
+	}
+	if viper.IsSet("whatsapp_history_sync_dump_enabled") {
+		config.WhatsappHistorySyncDumpEnabled = viper.GetBool("whatsapp_history_sync_dump_enabled")
+	}
 	if envWebhook := viper.GetString("whatsapp_webhook"); envWebhook != "" {
 		webhook := strings.Split(envWebhook, ",")
 		config.WhatsappWebhook = webhook
@@ -136,6 +162,12 @@ func initEnvConfig() {
 	if envWebhookEvents := viper.GetString("whatsapp_webhook_events"); envWebhookEvents != "" {
 		events := strings.Split(envWebhookEvents, ",")
 		config.WhatsappWebhookEvents = events
+	}
+	if len(config.WhatsappWebhook) > 0 && strings.TrimSpace(config.WhatsappWebhookSecret) == "" {
+		logrus.Fatalln("WHATSAPP_WEBHOOK_SECRET is required when WHATSAPP_WEBHOOK is configured")
+	}
+	if config.WhatsappWebhookInsecureSkipVerify {
+		logrus.Warn("WHATSAPP_WEBHOOK_INSECURE_SKIP_VERIFY=true disables TLS verification; use only for development")
 	}
 	if viper.IsSet("whatsapp_account_validation") {
 		config.WhatsappAccountValidation = viper.GetBool("whatsapp_account_validation")
@@ -157,6 +189,9 @@ func initEnvConfig() {
 	if envChatwootAPIToken := viper.GetString("chatwoot_api_token"); envChatwootAPIToken != "" {
 		config.ChatwootAPIToken = envChatwootAPIToken
 	}
+	if envChatwootWebhookToken := viper.GetString("chatwoot_webhook_token"); envChatwootWebhookToken != "" {
+		config.ChatwootWebhookToken = envChatwootWebhookToken
+	}
 	if viper.IsSet("chatwoot_account_id") {
 		config.ChatwootAccountID = viper.GetInt("chatwoot_account_id")
 	}
@@ -172,6 +207,27 @@ func initEnvConfig() {
 	}
 	if viper.IsSet("chatwoot_days_limit_import_messages") {
 		config.ChatwootDaysLimitImportMessages = viper.GetInt("chatwoot_days_limit_import_messages")
+	}
+	if viper.IsSet("chatwoot_sync_include_media") {
+		config.ChatwootSyncIncludeMedia = viper.GetBool("chatwoot_sync_include_media")
+	}
+	if viper.IsSet("chatwoot_sync_include_groups") {
+		config.ChatwootSyncIncludeGroups = viper.GetBool("chatwoot_sync_include_groups")
+	}
+	if viper.IsSet("chatwoot_sync_include_status") {
+		config.ChatwootSyncIncludeStatus = viper.GetBool("chatwoot_sync_include_status")
+	}
+	if viper.IsSet("chatwoot_sync_max_messages_per_chat") {
+		config.ChatwootSyncMaxMessagesPerChat = viper.GetInt("chatwoot_sync_max_messages_per_chat")
+	}
+	if viper.IsSet("chatwoot_sync_batch_size") {
+		config.ChatwootSyncBatchSize = viper.GetInt("chatwoot_sync_batch_size")
+	}
+	if viper.IsSet("chatwoot_sync_delay_ms") {
+		config.ChatwootSyncDelayMs = viper.GetInt("chatwoot_sync_delay_ms")
+	}
+	if viper.IsSet("chatwoot_sync_max_media_file_size") {
+		config.ChatwootSyncMaxMediaFileSize = viper.GetInt64("chatwoot_sync_max_media_file_size")
 	}
 
 	if viper.IsSet("chatwoot_sync_avatar") {
@@ -215,6 +271,42 @@ func initFlags() {
 		"basic-auth", "b",
 		config.AppBasicAuthCredential,
 		"basic auth credential | -b=yourUsername:yourPassword",
+	)
+	rootCmd.PersistentFlags().StringVarP(
+		&config.AppAuthToken,
+		"auth-token", "",
+		config.AppAuthToken,
+		`single shared token for API authentication (Authorization: Bearer <token> or X-API-Key) --auth-token <string> | example: --auth-token="super-secret-token"`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.AppSecurityHeaders,
+		"security-headers", "",
+		config.AppSecurityHeaders,
+		`enable secure HTTP response headers --security-headers <true/false> | example: --security-headers=true`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.AppRateLimitEnabled,
+		"rate-limit-enabled", "",
+		config.AppRateLimitEnabled,
+		`enable global request rate limiting by client IP --rate-limit-enabled <true/false> | example: --rate-limit-enabled=true`,
+	)
+	rootCmd.PersistentFlags().IntVarP(
+		&config.AppRateLimitMax,
+		"rate-limit-max", "",
+		config.AppRateLimitMax,
+		`max requests allowed per window for rate limiter --rate-limit-max <int> | example: --rate-limit-max=120`,
+	)
+	rootCmd.PersistentFlags().IntVarP(
+		&config.AppRateLimitWindowSec,
+		"rate-limit-window-sec", "",
+		config.AppRateLimitWindowSec,
+		`rate limiter window in seconds --rate-limit-window-sec <int> | example: --rate-limit-window-sec=60`,
+	)
+	rootCmd.PersistentFlags().StringSliceVarP(
+		&config.AppCorsOrigins,
+		"cors-origins", "",
+		config.AppCorsOrigins,
+		`allowed CORS origins (empty disables CORS middleware) --cors-origins <string> | example: --cors-origins="https://app.example.com,http://localhost:5173"`,
 	)
 	rootCmd.PersistentFlags().StringVarP(
 		&config.AppBasePath,
@@ -261,6 +353,18 @@ func initFlags() {
 		"auto-download-media", "",
 		config.WhatsappAutoDownloadMedia,
 		`auto download media from incoming messages --auto-download-media <true/false> | example: --auto-download-media=false`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappAutoDownloadStatusMedia,
+		"auto-download-status-media", "",
+		config.WhatsappAutoDownloadStatusMedia,
+		`auto download status/story media from incoming events --auto-download-status-media <true/false> | example: --auto-download-status-media=false`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappHistorySyncDumpEnabled,
+		"history-sync-dump-enabled", "",
+		config.WhatsappHistorySyncDumpEnabled,
+		`persist raw history sync payloads to files (may contain sensitive data and large payloads) --history-sync-dump-enabled <true/false> | example: --history-sync-dump-enabled=false`,
 	)
 	rootCmd.PersistentFlags().StringSliceVarP(
 		&config.WhatsappWebhook,
@@ -318,6 +422,12 @@ func initFlags() {
 		config.ChatwootDeviceID,
 		`device ID for Chatwoot outbound messages --chatwoot-device-id <string> | example: --chatwoot-device-id="my-device"`,
 	)
+	rootCmd.PersistentFlags().StringVarP(
+		&config.ChatwootWebhookToken,
+		"chatwoot-webhook-token", "",
+		config.ChatwootWebhookToken,
+		`optional shared token for /chatwoot/webhook (header X-Chatwoot-Token or query token) --chatwoot-webhook-token <string> | example: --chatwoot-webhook-token="cw-secret"`,
+	)
 	rootCmd.PersistentFlags().BoolVarP(
 		&config.ChatwootImportMessages,
 		"chatwoot-import-messages", "",
@@ -330,10 +440,57 @@ func initFlags() {
 		config.ChatwootDaysLimitImportMessages,
 		`days of message history to import to Chatwoot --chatwoot-days-limit-import-messages <int> | example: --chatwoot-days-limit-import-messages=7`,
 	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.ChatwootSyncIncludeMedia,
+		"chatwoot-sync-include-media", "",
+		config.ChatwootSyncIncludeMedia,
+		`include media attachments in Chatwoot sync --chatwoot-sync-include-media <true/false> | example: --chatwoot-sync-include-media=true`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.ChatwootSyncIncludeGroups,
+		"chatwoot-sync-include-groups", "",
+		config.ChatwootSyncIncludeGroups,
+		`include group chats in Chatwoot sync --chatwoot-sync-include-groups <true/false> | example: --chatwoot-sync-include-groups=true`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.ChatwootSyncIncludeStatus,
+		"chatwoot-sync-include-status", "",
+		config.ChatwootSyncIncludeStatus,
+		`include status/story chat in Chatwoot sync --chatwoot-sync-include-status <true/false> | example: --chatwoot-sync-include-status=false`,
+	)
+	rootCmd.PersistentFlags().IntVarP(
+		&config.ChatwootSyncMaxMessagesPerChat,
+		"chatwoot-sync-max-messages-per-chat", "",
+		config.ChatwootSyncMaxMessagesPerChat,
+		`max messages per chat in Chatwoot sync --chatwoot-sync-max-messages-per-chat <int> | example: --chatwoot-sync-max-messages-per-chat=300`,
+	)
+	rootCmd.PersistentFlags().IntVarP(
+		&config.ChatwootSyncBatchSize,
+		"chatwoot-sync-batch-size", "",
+		config.ChatwootSyncBatchSize,
+		`batch size for Chatwoot sync throttling --chatwoot-sync-batch-size <int> | example: --chatwoot-sync-batch-size=10`,
+	)
+	rootCmd.PersistentFlags().IntVarP(
+		&config.ChatwootSyncDelayMs,
+		"chatwoot-sync-delay-ms", "",
+		config.ChatwootSyncDelayMs,
+		`delay between Chatwoot sync batches in ms --chatwoot-sync-delay-ms <int> | example: --chatwoot-sync-delay-ms=500`,
+	)
+	rootCmd.PersistentFlags().Int64VarP(
+		&config.ChatwootSyncMaxMediaFileSize,
+		"chatwoot-sync-max-media-file-size", "",
+		config.ChatwootSyncMaxMediaFileSize,
+		`max media file size (bytes) to download during Chatwoot sync (0 = unlimited) --chatwoot-sync-max-media-file-size <int> | example: --chatwoot-sync-max-media-file-size=20000000`,
+	)
 }
 
 func initChatStorage() (*sql.DB, error) {
-	connStr := fmt.Sprintf("%s?_journal_mode=WAL", config.ChatStorageURI)
+	connStr := config.ChatStorageURI
+	separator := "?"
+	if strings.Contains(connStr, "?") {
+		separator = "&"
+	}
+	connStr = fmt.Sprintf("%s%s_journal_mode=WAL", connStr, separator)
 	if config.ChatStorageEnableForeignKeys {
 		connStr += "&_foreign_keys=on"
 	}
@@ -378,6 +535,10 @@ func initApp() {
 
 	chatStorageRepo = chatstorage.NewStorageRepository(chatStorageDB)
 	chatStorageRepo.InitializeSchema()
+	apiKeyService = apikey.NewService(chatStorageDB)
+	if err := apiKeyService.InitializeSchema(); err != nil {
+		logrus.Fatalf("failed to initialize api key schema: %v", err)
+	}
 
 	whatsappDB := whatsapp.InitWaDB(ctx, config.DBURI)
 	var keysDB *sqlstore.Container
