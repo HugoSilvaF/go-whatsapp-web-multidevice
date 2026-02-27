@@ -57,7 +57,7 @@ export default {
                 isValid = false;
             }
 
-            const fileInput = $("#file_video")[0];
+            const fileInput = this.$refs.fileInput;
             const hasFile = fileInput && fileInput.files && fileInput.files[0];
 
             if (!hasFile && !this.video_url) {
@@ -99,7 +99,7 @@ export default {
                     payload.append("duration", this.duration)
                 }
 
-                const fileInput = $("#file_video")[0];
+                const fileInput = this.$refs.fileInput;
                 if (fileInput && fileInput.files && fileInput.files[0]) {
                     payload.append('video', fileInput.files[0])
                 }
@@ -128,7 +128,9 @@ export default {
             this.video_url = null;
             this.is_forwarded = false;
             this.duration = 0;
-            $("#file_video").val('');
+            if (this.$refs.fileInput) {
+                this.$refs.fileInput.value = '';
+            }
         },
         handleFileChange(event) {
             const file = event.target.files[0];
@@ -199,7 +201,7 @@ export default {
                 <div style="text-align: left; font-weight: bold; margin: 10px 0;" v-if="!video_url">or you can upload video from your device</div>
                 <div class="field" style="padding-bottom: 30px" v-if="!video_url">
                     <label>Video</label>
-                    <input type="file" style="display: none" accept="video/*" id="file_video" @change="handleFileChange">
+                    <input type="file" style="display: none" ref="fileInput" accept="video/*" id="file_video" @change="handleFileChange">
                     <label for="file_video" class="ui positive medium green left floated button" style="color: white">
                         <i class="ui upload icon"></i>
                         Upload video

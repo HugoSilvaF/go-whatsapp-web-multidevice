@@ -18,10 +18,15 @@ func DeviceMiddleware(dm *whatsapp.DeviceManager) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Allow non-device-scoped public endpoints (e.g., landing page) to pass through.
 		path := strings.TrimSpace(c.Path())
-		if path == "/" || path == "" || path == config.AppBasePath || path == config.AppBasePath+"/" {
-			return c.Next()
-		}
-
+		if path == "/" || path == "" || 
+           path == config.AppBasePath || 
+           path == config.AppBasePath+"/" ||
+           path == "/application/health" ||
+           strings.HasPrefix(path, "/.well-known/") ||
+           strings.HasPrefix(path, "/assets") ||
+           path == "/favicon.ico" {
+            return c.Next()
+        }
 		if dm == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(utils.ResponseData{
 				Status:  fiber.StatusServiceUnavailable,

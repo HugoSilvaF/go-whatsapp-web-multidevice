@@ -13,5 +13,6 @@ func SecurityHeaders() fiber.Handler {
 		HSTSMaxAge:            31536000,
 		HSTSExcludeSubdomains: false,
 		ReferrerPolicy:        "no-referrer",
+		CrossOriginEmbedderPolicy: "unsafe-none",
 	})
 }
